@@ -56,7 +56,6 @@ window.__ModuleLoader__.load({
       'commit.placeholder': 'Message',
       'commit.stageAll': 'Stage All',
       'commit.generate': 'Generate commit message',
-      'commit.generating': 'Writing a message…',
       'commit.generated': 'Message written from the current diff.',
       'commit.action': 'Commit staged changes',
       'action.stage': 'Stage',
@@ -125,7 +124,6 @@ window.__ModuleLoader__.load({
       'commit.blocked.conflicts': 'Resolve the conflicted files before committing.',
       'commit.blocked.empty': 'The work tree is clean. There is nothing to commit.',
       'commit.blocked.unstaged': 'Nothing is staged yet. Stage a file to include it.',
-      'commit.blocked.message': 'Write a commit message first.',
       'commit.blocked.detached': 'Detached HEAD: this commit belongs to no branch.',
       'commit.button': 'Commit {count} file(s)',
       'commit.leftOut': '{count} change(s) stay out of this commit.',
@@ -134,8 +132,6 @@ window.__ModuleLoader__.load({
       'commit.readyToPull': 'The remote has {count} commit(s) to bring in.',
       'commit.pushAction': 'Push {count} commit(s)',
       'commit.pullAction': 'Pull {count} commit(s)',
-      'confirm.publishBranch': 'Publish {branch} to origin and set its upstream?',
-      'confirm.pushCount': 'Push {count} commit(s) from {branch}?',
       'notice.failed': 'The git command failed.',
       'view.noWorkspace': 'This session has no workspace directory to inspect.',
     };
@@ -357,6 +353,7 @@ window.__ModuleLoader__.load({
       fetch: [['path', { d: 'M13 8a5 5 0 1 1-1.6-3.7' }], ['path', { d: 'M13.2 2.9v2.8h-2.8' }]],
       pull: [['path', { d: 'M8 2.6v6.4' }], ['path', { d: 'M5.2 6.2 8 9l2.8-2.8' }], ['path', { d: 'M2.8 12.4h10.4' }]],
       push: [['path', { d: 'M8 9.4V3' }], ['path', { d: 'M5.2 5.8 8 3l2.8 2.8' }], ['path', { d: 'M2.8 12.4h10.4' }]],
+      check: [['path', { d: 'M3.5 8.5 6.5 11.5 12.5 5.5' }]],
       apply: [['path', { d: 'M8 2.6v6' }], ['path', { d: 'M5.2 6 8 8.8 10.8 6' }], ['path', { d: 'M3.4 9.4v3.6h9.2V9.4' }]],
       pop: [['path', { d: 'M8 8.6V2.6' }], ['path', { d: 'M5.2 5.2 8 2.4l2.8 2.8' }], ['path', { d: 'M3.4 9.4v3.6h9.2V9.4' }]],
       spark: [
@@ -682,18 +679,8 @@ window.__ModuleLoader__.load({
         ? t('sync.pullFirstHint', { count: behind })
         : null;
 
-      /** Ask before publishing or pushing the branch. */
-      const askPush = () => ask({
-        title: unpublished ? t('sync.publish') : t('push'),
-        description: unpublished
-          ? t('confirm.publishBranch', { branch: status.branch })
-          : t('confirm.pushCount', { count: ahead, branch: status.branch }),
-        command: unpublished ? `git push --set-upstream origin ${status.branch}` : 'git push',
-        onConfirm: () => {
-          setConfirm(null);
-          void execute({ action: 'push', path: chosenPath });
-        },
-      });
+      /** Push or publish the current branch to the remote. */
+      const push = () => void execute({ action: 'push', path: chosenPath });
 
       /**
        * The action the commit card offers while nothing is staged: hand the
@@ -708,7 +695,7 @@ window.__ModuleLoader__.load({
               id: 'push',
               label: unpublished ? t('sync.publish') : t('commit.pushAction', { count: ahead }),
               hint: pushHint,
-              run: askPush,
+              run: push,
             }
           : canPull
             ? {
@@ -721,10 +708,10 @@ window.__ModuleLoader__.load({
 
       /** One line explaining the current commit precondition. */
       const commitHint = (
-        generating ? t('commit.generating')
+        generating ? null
           : hasConflicts ? t('commit.blocked.conflicts')
             : stagedCount > 0
-              ? (message.trim() === '' ? t('commit.blocked.message')
+              ? (message.trim() === '' ? null
                 : looseCount > 0 ? t('commit.leftOut', { count: looseCount })
                   : detached ? t('commit.blocked.detached')
                     : t('commit.ready', { count: stagedCount }))
@@ -733,6 +720,57 @@ window.__ModuleLoader__.load({
                   : clean ? t('commit.blocked.empty')
                     : t('commit.blocked.unstaged')
       );
+
+      /**
+       * The single primary action for the commit card.
+       * Adapts to the repository's sync and staging state:
+       * - Conflicts present: disabled conflict alert
+       * - Staged files present: commit staged changes
+       * - Unstaged files present (0 staged): stage all changes
+       * - Clean repository: push (if ahead) or pull (if behind)
+       * - Clean and up to date: null (no action needed)
+       */
+      const mainAction = hasConflicts
+        ? {
+            id: 'conflicts',
+            label: t('group.conflicts'),
+            icon: 'close',
+            disabled: true,
+            primary: false,
+            hint: t('commit.blocked.conflicts'),
+            run: () => {},
+          }
+        : stagedCount > 0
+          ? {
+              id: 'commit',
+              label: t('commit.button', { count: stagedCount }),
+              icon: 'check',
+              disabled: busy || generating || message.trim() === '' || detached,
+              primary: message.trim() !== '' && !busy && !generating && !detached,
+              hint: commitHint,
+              run: () => void commit(),
+            }
+          : files.length > 0
+            ? {
+                id: 'stageAll',
+                label: t('commit.stageAll'),
+                icon: 'stage',
+                disabled: busy || generating,
+                primary: !busy && !generating,
+                hint: t('commit.stageAllHint'),
+                run: () => void stageAll(),
+              }
+            : cardAction !== null
+              ? {
+                  id: cardAction.id,
+                  label: cardAction.label,
+                  icon: cardAction.id === 'push' ? 'push' : 'pull',
+                  disabled: busy || (cardAction.id === 'push' && !canPush),
+                  primary: !busy && (cardAction.id !== 'push' || canPush),
+                  hint: cardAction.hint,
+                  run: cardAction.run,
+                }
+              : null;
 
 
       /**
@@ -1017,7 +1055,7 @@ window.__ModuleLoader__.load({
                         hint: pushHint,
                         badge: ahead > 0 ? t('state.ahead', { count: ahead }) : null,
                         disabled: busy || !canPush,
-                        onClick: askPush,
+                        onClick: push,
                       }),
                     ),
                   ),
@@ -1067,12 +1105,21 @@ window.__ModuleLoader__.load({
                                 'div',
                                 { className: 'gctl-textareaWrap' },
                                 h('textarea', {
-                                  className: 'gctl-textarea',
+                                  className: generating ? 'gctl-textarea gctl-textareaGenerating' : 'gctl-textarea',
                                   rows: 3,
                                   value: message,
                                   placeholder: t('commit.placeholder'),
                                   'aria-label': t('commit.placeholder'),
+                                  readOnly: generating,
                                   onChange: (event) => setMessage(event.target.value),
+                                  onKeyDown: (event) => {
+                                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                                      if (mainAction !== null && !mainAction.disabled) {
+                                        event.preventDefault();
+                                        mainAction.run();
+                                      }
+                                    }
+                                  },
                                 }),
                                 h(
                                   'span',
@@ -1080,64 +1127,42 @@ window.__ModuleLoader__.load({
                                   h(IconButton, {
                                     name: 'spark',
                                     label: t('commit.generate'),
-                                    hint: generating ? t('commit.generating') : t('commit.generateHint'),
+                                    hint: t('commit.generateHint'),
                                     busy: generating,
                                     disabled: busy || generating || files.length === 0,
                                     onClick: () => void generateMessage(),
                                   }),
                                 ),
                               ),
-                          clean
+                          mainAction === null
                             ? null
                             : h(
                                 'div',
-                                { className: 'gctl-stageAllRow' },
+                                { className: 'gctl-mainActionRow' },
                                 h(
                                   'button',
                                   {
                                     type: 'button',
-                                    className: 'gctl-stageAllButton',
-                                    disabled: busy || files.length === 0 || files.every((file) => file.staged),
-                                    onClick: () => void stageAll(),
+                                    className: `gctl-mainActionButton${mainAction.primary ? ' gctl-primary' : ''}`,
+                                    title: mainAction.hint ?? mainAction.label,
+                                    disabled: mainAction.disabled,
+                                    onClick: () => mainAction.run(),
                                   },
-                                  h(Glyph, { name: 'stage', size: 14 }),
-                                  h('span', null, t('commit.stageAll')),
-                                  h('span', { className: 'gctl-buttonDivider' }),
-                                  h(Glyph, { name: 'chevronDown', size: 12 }),
+                                  h(Glyph, { name: mainAction.icon, size: 14 }),
+                                  h('span', null, mainAction.label),
                                 ),
                               ),
-                          h(
-                            'div',
-                            { className: 'gctl-commitActions' },
-                            h(
-                              'span',
-                              { className: commitBlocker === 'conflicts' ? 'gctl-hint gctl-hintBad' : 'gctl-hint' },
-                              commitHint,
-                            ),
-                            cardAction === null
-                              ? h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    className: 'gctl-button gctl-primary',
-                                    title: commitBlocker === null && message.trim() !== '' ? t('commit.action') : commitHint,
-                                    disabled: busy || generating || commitBlocker !== null || message.trim() === '',
-                                    onClick: () => void commit(),
-                                  },
-                                  stagedCount === 0 ? t('commit.action') : t('commit.button', { count: stagedCount }),
-                                )
-                              : h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    className: 'gctl-button gctl-primary',
-                                    title: cardAction.hint,
-                                    disabled: busy,
-                                    onClick: () => cardAction.run(),
-                                  },
-                                  cardAction.label,
+                          commitHint === null || (clean && mainAction === null)
+                            ? null
+                            : h(
+                                'div',
+                                { className: 'gctl-commitHintRow' },
+                                h(
+                                  'span',
+                                  { className: commitBlocker === 'conflicts' ? 'gctl-hint gctl-hintBad' : 'gctl-hint' },
+                                  commitHint,
                                 ),
-                          ),
+                              ),
                         ),
                         renderGroup({
                           key: 'conflicts',
@@ -1536,7 +1561,7 @@ window.__ModuleLoader__.load({
 .gctl-tabActive{border-bottom-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary)}
 .gctl-body{min-height:0;padding-bottom:8px}
 .gctl-hint{color:var(--dsw-alias-label-secondary);margin:10px 0;font-size:13px}
-.gctl-commit{border:.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);margin-bottom:18px;padding:12px}
+.gctl-commit{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);margin-bottom:18px;padding:12px}
 .gctl-commitIdle{background:var(--dsw-alias-bg-base)}
 .gctl-commitTools{margin-bottom:8px;justify-content:space-between;align-items:flex-start;gap:10px;display:flex}
 .gctl-commitTools .gctl-hint{margin:0}
@@ -1554,17 +1579,21 @@ window.__ModuleLoader__.load({
 .gctl-iconDanger,.gctl-iconDanger:hover:not(:disabled){color:var(--dsw-alias-state-error-primary)}
 .gctl-badge{color:var(--dsw-alias-brand-primary);font-variant-numeric:tabular-nums;font-size:10px;line-height:1}
 @keyframes gctl-pulse{50%{opacity:.45}}
-.gctl-textarea,.gctl-input{width:100%;border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;padding:8px 10px;resize:vertical}
+.gctl-textarea,.gctl-input{box-sizing:border-box;width:100%;border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;padding:8px 10px;resize:vertical;display:block;transition:border-color .2s ease,box-shadow .2s ease,background .2s ease}
 .gctl-textarea:focus,.gctl-input:focus{border-color:var(--dsw-alias-brand-primary)}
-.gctl-textareaWrap{position:relative;width:100%}
+.gctl-textareaGenerating{border-color:var(--dsw-alias-brand-primary);background:linear-gradient(90deg,var(--dsw-alias-bg-base) 0%,color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,var(--dsw-alias-bg-base)) 50%,var(--dsw-alias-bg-base) 100%);background-size:200% 100%;animation:gctl-shimmer 2s linear infinite,gctl-glow 2s ease-in-out infinite;cursor:progress}
+@keyframes gctl-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+@keyframes gctl-glow{0%,100%{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 50%,var(--dsw-alias-border-l2));box-shadow:0 0 0 1px color-mix(in srgb,var(--dsw-alias-brand-primary) 40%,transparent),0 0 6px color-mix(in srgb,var(--dsw-alias-brand-primary) 15%,transparent)}50%{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 1px var(--dsw-alias-brand-primary),0 0 14px color-mix(in srgb,var(--dsw-alias-brand-primary) 45%,transparent)}}
+.gctl-textareaWrap{position:relative;width:100%;box-sizing:border-box}
 .gctl-textareaWrap .gctl-textarea{padding-right:38px}
 .gctl-textareaSpark{position:absolute;top:6px;right:6px;z-index:2}
-.gctl-stageAllRow{margin-top:10px;display:flex}
-.gctl-stageAllButton{width:100%;height:32px;background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;padding:0 12px;gap:8px}
-.gctl-stageAllButton:hover:not(:disabled){background:var(--dsw-alias-bg-layer-3)}
-.gctl-stageAllButton:disabled{color:var(--dsw-alias-state-idle-primary);cursor:default}
-.gctl-buttonDivider{width:1px;height:16px;background:var(--dsw-alias-border-l2);margin-left:auto;margin-right:2px}
-.gctl-commitActions{justify-content:space-between;align-items:center;gap:12px;margin-top:10px;display:flex}
+.gctl-mainActionRow{margin-top:10px;display:flex}
+.gctl-mainActionButton{box-sizing:border-box;width:100%;height:32px;background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 12px;gap:8px}
+.gctl-mainActionButton:hover:not(:disabled){background:var(--dsw-alias-bg-layer-3)}
+.gctl-mainActionButton:disabled{color:var(--dsw-alias-state-idle-primary);border-color:var(--dsw-alias-border-l2);cursor:default}
+.gctl-mainActionButton.gctl-primary{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+.gctl-commitHintRow{margin-top:8px;display:flex;align-items:center;justify-content:center;text-align:center}
+.gctl-commitHintRow .gctl-hint{margin:0;font-size:12px}
 .gctl-group{margin-bottom:18px}
 .gctl-groupHead{display:flex;align-items:center;justify-content:space-between;padding:4px 6px;margin:8px 0 4px;border-radius:6px;cursor:pointer;user-select:none}
 .gctl-groupHead:hover{background:var(--dsw-alias-bg-layer-1)}
@@ -1635,7 +1664,7 @@ window.__ModuleLoader__.load({
 .gctl-compact .gctl-chip{font-size:10px;line-height:16px;padding:0 6px}
 .gctl-compact .gctl-iconButton{min-width:24px;height:22px;padding:0 3px}
 .gctl-compact .gctl-rowActions{gap:0}
-.gctl-compact .gctl-commitActions{flex-wrap:wrap;gap:8px}
+.gctl-compact .gctl-mainActionButton{height:28px;font-size:12px;padding:0 8px}
 .gctl-compact .gctl-textarea{font-size:12px}
 .gctl-compact .gctl-groupTitle{font-size:12px}
 .gctl-compact .gctl-button{height:26px;font-size:12px;padding:0 10px}
