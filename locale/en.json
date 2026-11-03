@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git Control",
+    "description": "A sidebar panel that reviews workspace changes, stages and commits them, manages branches and stashes, and syncs with the remote."
+  }
+}

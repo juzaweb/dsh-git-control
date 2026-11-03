@@ -1,0 +1,3 @@
+- insert:
+    - id: git-control
+      name: '@local/dsh-git-control'
