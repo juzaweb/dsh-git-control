@@ -53,8 +53,8 @@ window.__ModuleLoader__.load({
       'group.untracked': 'Untracked files',
       'group.conflicts': 'Conflicts',
       'group.count': '{count}',
-      'commit.placeholder': 'Commit message',
-      'commit.stageAll': 'Stage all changes',
+      'commit.placeholder': 'Message',
+      'commit.stageAll': 'Stage All',
       'commit.generate': 'Generate commit message',
       'commit.generating': 'Writing a message…',
       'commit.generated': 'Message written from the current diff.',
@@ -63,6 +63,7 @@ window.__ModuleLoader__.load({
       'action.unstage': 'Unstage',
       'action.diff': 'Diff',
       'action.view': 'View',
+      'action.viewAll': 'View all',
       'action.discard': 'Discard',
       'action.close': 'Close',
       'diff.staged': 'Staged diff',
@@ -326,15 +327,13 @@ window.__ModuleLoader__.load({
      * Each entry lists the primitives of one icon.
      */
     const ICONS = {
-      stage: [['path', { d: 'M8 3.2v9.6' }], ['path', { d: 'M3.2 8h9.6' }]],
+      stage: [['path', { d: 'M8 3.5v9' }], ['path', { d: 'M3.5 8h9' }]],
       stageAll: [['path', { d: 'M8 2.5v7' }], ['path', { d: 'M5 6.7 8 9.7l3-3' }], ['path', { d: 'M2.8 12.2h10.4' }]],
-      unstage: [['path', { d: 'M3.4 8h9.2' }], ['path', { d: 'M8 9.6V3' }], ['path', { d: 'M5.4 5.6 8 3l2.6 2.6' }]],
+      unstage: [['path', { d: 'M3.5 8h9' }]],
       trash: [
-        ['path', { d: 'M2.8 4.4h10.4' }],
-        ['path', { d: 'M6.3 4.4V2.9h3.4v1.5' }],
-        ['path', { d: 'M4.4 4.4 5 13h6l.6-8.6' }],
-        ['path', { d: 'M6.7 6.8v3.9' }],
-        ['path', { d: 'M9.3 6.8v3.9' }],
+        ['path', { d: 'M2.5 5.5h11' }],
+        ['path', { d: 'M6 5.5V4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.5' }],
+        ['path', { d: 'M4 5.5v7a1.5 1.5 0 0 0 1.5 1.5h5a1.5 1.5 0 0 0 1.5-1.5v-7' }],
       ],
       diff: [
         ['path', { d: 'M4.4 2.4h4.3l2.9 2.9v8.3H4.4z' }],
@@ -342,7 +341,17 @@ window.__ModuleLoader__.load({
         ['path', { d: 'M6.3 8.4h3.4' }],
         ['path', { d: 'M6.3 10.6h3.4' }],
       ],
-      revert: [['path', { d: 'M3.6 8a4.5 4.5 0 1 0 1.6-3.5' }], ['path', { d: 'M3.3 2.7v2.7h2.7' }]],
+      file: [
+        ['path', { d: 'M3.5 13.5V3.5A1 1 0 0 1 4.5 2.5h5.5l3.5 3.5v7.5a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1Z' }],
+        ['path', { d: 'M10 2.5v3.5h3.5' }],
+        ['path', { d: 'M5.5 6.5h2' }],
+        ['path', { d: 'M5.5 9h5' }],
+        ['path', { d: 'M5.5 11.5h5' }],
+      ],
+      revert: [
+        ['path', { d: 'M6 4.5 3.5 7 6 9.5' }],
+        ['path', { d: 'M4 7h5.5a3.5 3.5 0 0 1 3.5 3.5v.5a3.5 3.5 0 0 1-3.5 3.5H6.5' }],
+      ],
       reset: [['path', { d: 'M6.4 3.4 3 8l3.4 4.6' }], ['path', { d: 'M12.6 3.4 9.2 8l3.4 4.6' }]],
       switch: [['path', { d: 'M2.8 8h8.2' }], ['path', { d: 'M8.4 5.4 11 8l-2.6 2.6' }], ['path', { d: 'M13.2 3.4v9.2' }]],
       fetch: [['path', { d: 'M13 8a5 5 0 1 1-1.6-3.7' }], ['path', { d: 'M13.2 2.9v2.8h-2.8' }]],
@@ -351,19 +360,22 @@ window.__ModuleLoader__.load({
       apply: [['path', { d: 'M8 2.6v6' }], ['path', { d: 'M5.2 6 8 8.8 10.8 6' }], ['path', { d: 'M3.4 9.4v3.6h9.2V9.4' }]],
       pop: [['path', { d: 'M8 8.6V2.6' }], ['path', { d: 'M5.2 5.2 8 2.4l2.8 2.8' }], ['path', { d: 'M3.4 9.4v3.6h9.2V9.4' }]],
       spark: [
-        ['path', { d: 'M8 2.2 9.4 6l3.8 1.4L9.4 8.8 8 12.6 6.6 8.8 2.8 7.4 6.6 6z' }],
-        ['path', { d: 'M12.4 11.2l.5 1.3 1.3.5-1.3.5-.5 1.3-.5-1.3-1.3-.5 1.3-.5z' }],
+        ['path', { d: 'M8 2.2C8 5.4 6 7.4 2.8 8c3.2.6 5.2 2.6 5.2 5.8.6-3.2 2.6-5.2 5.8-5.8-3.2-.6-5.2-2.6-5.8-5.8Z' }],
+        ['path', { d: 'M13 1.8v2.4M11.8 3h2.4' }],
+        ['circle', { cx: 3.6, cy: 12.4, r: 1 }],
       ],
+      chevronDown: [['path', { d: 'M4 6.5 8 10.5 12 6.5' }]],
+      chevronRight: [['path', { d: 'M6.5 4 10.5 8 6.5 12' }]],
       refresh: [['path', { d: 'M13 8a5 5 0 1 1-1.6-3.7' }], ['path', { d: 'M13.2 2.9v2.8h-2.8' }]],
       close: [['path', { d: 'M4.6 4.6 11.4 11.4' }], ['path', { d: 'M11.4 4.6 4.6 11.4' }]],
     };
 
     /**
      * Render one glyph from the shared icon set.
-     * @param props - icon name and edge size.
+     * @param props - icon name, edge size, optional style, and className.
      * @returns the svg element.
      */
-    function Glyph({ name, size = 16 }) {
+    function Glyph({ name, size = 16, style = null, className = null }) {
       const primitives = ICONS[name] ?? ICONS.close;
       return h(
         'svg',
@@ -378,9 +390,53 @@ window.__ModuleLoader__.load({
           strokeLinejoin: 'round',
           focusable: 'false',
           'aria-hidden': 'true',
+          style: style === null ? undefined : style,
+          className: className === null ? undefined : className,
         },
         primitives.map(([tag, attrs], index) => h(tag, { key: index, ...attrs })),
       );
+    }
+
+    /**
+     * Split a repository-relative path into base name and directory path.
+     * @param filePath - repo-relative file path.
+     * @returns `{ name, dir }`.
+     */
+    function splitFilePath(filePath) {
+      if (typeof filePath !== 'string') return { name: '', dir: null };
+      const lastSlash = filePath.lastIndexOf('/');
+      if (lastSlash === -1) {
+        return { name: filePath, dir: null };
+      }
+      return {
+        name: filePath.slice(lastSlash + 1),
+        dir: filePath.slice(0, lastSlash),
+      };
+    }
+
+    /**
+     * Derive the status badge code, semantic tone, and label from git status facts.
+     * @param file - status entry for one path.
+     * @returns `{ code, tone, color, label }`.
+     */
+    function getFileStatusInfo(file) {
+      if (file.conflicted) {
+        return { code: 'C', tone: 'bad', color: 'var(--dsw-alias-state-error-primary, #f85149)', label: 'Conflicted' };
+      }
+      if (file.untracked) {
+        return { code: 'U', tone: 'ok', color: 'var(--dsw-alias-state-success-primary, #3fb950)', label: 'Untracked' };
+      }
+      const code = file.code || '';
+      if (code.includes('A')) {
+        return { code: 'A', tone: 'ok', color: 'var(--dsw-alias-state-success-primary, #3fb950)', label: 'Added' };
+      }
+      if (code.includes('D')) {
+        return { code: 'D', tone: 'bad', color: 'var(--dsw-alias-state-error-primary, #f85149)', label: 'Deleted' };
+      }
+      if (code.includes('R')) {
+        return { code: 'R', tone: 'warn', color: 'var(--dsw-alias-state-warning-primary, #e3b341)', label: 'Renamed' };
+      }
+      return { code: 'M', tone: 'warn', color: 'var(--dsw-alias-state-warning-primary, #e3b341)', label: 'Modified' };
     }
 
     /**
@@ -439,6 +495,9 @@ window.__ModuleLoader__.load({
       const [switchOnCreate, setSwitchOnCreate] = React.useState(true);
       const [confirm, setConfirm] = React.useState(null);
       const [generating, setGenerating] = React.useState(false);
+      const [collapsedGroups, setCollapsedGroups] = React.useState({});
+
+      const toggleGroup = (key) => setCollapsedGroups((current) => ({ ...current, [key]: !current[key] }));
 
       const chosenPath = fixedPath ?? repoPath ?? (workspaces.length > 0 ? workspaces[0].path : null);
 
@@ -681,21 +740,38 @@ window.__ModuleLoader__.load({
        * @param group - heading, rows, and the action set for the group.
        * @returns the group element or null when empty.
        */
-      const renderGroup = ({ key, title, rows, actions }) => {
+      const renderGroup = ({ key, title, rows, actions, headerActions = [] }) => {
         if (rows.length === 0) return null;
+        const isCollapsed = collapsedGroups[key] === true;
         return h(
           'section',
           { className: 'gctl-group', key },
-          h('h2', { className: 'gctl-groupTitle' }, title, h('span', { className: 'gctl-count' }, t('group.count', { count: rows.length }))),
-          h('ul', { className: 'gctl-rows' }, rows.map((file) => h(
-            'li',
-            { className: 'gctl-row', key: `${file.code}:${file.path}` },
-            h('span', { className: 'gctl-code' }, file.code),
-            h('span', { className: 'gctl-path', title: file.path }, file.originalPath === null ? file.path : `${file.originalPath} → ${file.path}`),
+          h(
+            'div',
+            {
+              className: 'gctl-groupHead',
+              role: 'button',
+              tabIndex: 0,
+              'aria-expanded': !isCollapsed,
+              onClick: () => toggleGroup(key),
+              onKeyDown: (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  toggleGroup(key);
+                }
+              },
+            },
             h(
               'span',
-              { className: 'gctl-rowActions' },
-              actions.map((makeAction) => makeAction(file)).map((action) => h(IconButton, {
+              { className: 'gctl-groupTitleWrap' },
+              h(Glyph, { name: isCollapsed ? 'chevronRight' : 'chevronDown', size: 14, className: 'gctl-groupChevron' }),
+              h('span', { className: 'gctl-groupTitle' }, title),
+              h('span', { className: 'gctl-count' }, t('group.count', { count: rows.length })),
+            ),
+            h(
+              'span',
+              { className: 'gctl-groupActions', onClick: (e) => e.stopPropagation() },
+              headerActions.map((action) => h(IconButton, {
                 key: action.id,
                 name: action.icon,
                 label: action.label,
@@ -704,8 +780,56 @@ window.__ModuleLoader__.load({
                 disabled: busy,
                 onClick: () => action.run(),
               })),
+              h('span', { className: 'gctl-viewAll' }, t('action.viewAll')),
             ),
-          ))),
+          ),
+          isCollapsed
+            ? null
+            : h('ul', { className: 'gctl-rows' }, rows.map((file) => {
+                const statusInfo = getFileStatusInfo(file);
+                const { name: fileName, dir: fileDir } = splitFilePath(file.path);
+                const originalSplit = file.originalPath ? splitFilePath(file.originalPath) : null;
+                return h(
+                  'li',
+                  {
+                    className: selected?.path === file.path ? 'gctl-row gctl-rowActive' : 'gctl-row',
+                    key: `${file.code}:${file.path}`,
+                    onClick: () => setSelected({ path: file.path, staged: file.staged === true, untracked: file.untracked === true }),
+                  },
+                  h('span', {
+                    className: 'gctl-fileIcon',
+                    style: { color: statusInfo.color },
+                    title: `${statusInfo.label} (${statusInfo.code})`,
+                  }, h(Glyph, { name: 'file', size: 16 })),
+                  h(
+                    'span',
+                    { className: 'gctl-fileDetails', title: file.originalPath ? `${file.originalPath} → ${file.path}` : file.path },
+                    h('span', { className: 'gctl-fileName' }, originalSplit ? `${originalSplit.name} → ${fileName}` : fileName),
+                    fileDir ? h('span', { className: 'gctl-fileDir' }, fileDir) : null,
+                  ),
+                  h(
+                    'span',
+                    { className: 'gctl-rowTail' },
+                    h(
+                      'span',
+                      { className: 'gctl-rowActions', onClick: (e) => e.stopPropagation() },
+                      actions.map((makeAction) => makeAction(file)).map((action) => h(IconButton, {
+                        key: action.id,
+                        name: action.icon,
+                        label: action.label,
+                        hint: action.hint === undefined ? null : action.hint,
+                        danger: action.destructive === true,
+                        disabled: busy,
+                        onClick: () => action.run(),
+                      })),
+                    ),
+                    h('span', {
+                      className: `gctl-statusTag gctl-statusTag-${statusInfo.tone}`,
+                      style: { color: statusInfo.color },
+                    }, statusInfo.code),
+                  ),
+                );
+              })),
         );
       };
 
@@ -718,7 +842,53 @@ window.__ModuleLoader__.load({
 
       const stageActions = (file) => ({ id: 'stage', icon: 'stage', label: t('action.stage'), run: () => void toggleStage(file) });
       const unstageActions = (file) => ({ id: 'unstage', icon: 'unstage', label: t('action.unstage'), run: () => void toggleStage(file) });
-      const discardActions = (file) => ({ id: 'discard', icon: 'trash', label: t('action.discard'), destructive: true, run: () => askDiscard(file) });
+      const discardActions = (file) => ({
+        id: 'discard',
+        icon: file.untracked ? 'trash' : 'revert',
+        label: t('action.discard'),
+        destructive: true,
+        run: () => askDiscard(file),
+      });
+
+      const discardAllChanged = () => ask({
+        title: t('action.discard'),
+        description: t('confirm.discardStaged', { count: changedFiles.length }),
+        command: `git restore -- ${changedFiles.map((f) => f.path).join(' ')}`,
+        destructive: true,
+        onConfirm: () => {
+          setConfirm(null);
+          void execute({ action: 'discard', path: chosenPath, paths: changedFiles.map((f) => f.path) });
+        },
+      });
+
+      const stageAllChanged = () => execute({
+        action: 'stage',
+        path: chosenPath,
+        paths: changedFiles.map((f) => f.path),
+      });
+
+      const discardAllUntracked = () => ask({
+        title: t('action.discard'),
+        description: t('confirm.discardStaged', { count: untrackedFiles.length }),
+        command: `git clean -f -d -- ${untrackedFiles.map((f) => f.path).join(' ')}`,
+        destructive: true,
+        onConfirm: () => {
+          setConfirm(null);
+          void execute({ action: 'discard', path: chosenPath, paths: untrackedFiles.map((f) => f.path), untracked: true });
+        },
+      });
+
+      const stageAllUntracked = () => execute({
+        action: 'stage',
+        path: chosenPath,
+        paths: untrackedFiles.map((f) => f.path),
+      });
+
+      const unstageAllStaged = () => execute({
+        action: 'unstage',
+        path: chosenPath,
+        paths: stagedFiles.map((f) => f.path),
+      });
 
       const tabButton = (id, label) => h(
         'button',
@@ -890,36 +1060,52 @@ window.__ModuleLoader__.load({
                               untrackedFiles.length === 0 ? null : h('span', { key: 'untracked', className: 'gctl-chip' }, t('state.untracked', { count: untrackedFiles.length })),
                               hasConflicts ? h('span', { key: 'conflicts', className: 'gctl-chip gctl-chipBad' }, t('state.conflict', { count: conflictedFiles.length })) : null,
                             ),
-                            h(
-                              'span',
-                              { className: 'gctl-toolGroup' },
-                              h(IconButton, {
-                                name: 'stageAll',
-                                label: t('commit.stageAll'),
-                                hint: t('commit.stageAllHint'),
-                                disabled: busy || generating || files.length === 0 || files.every((file) => file.staged),
-                                onClick: () => void stageAll(),
-                              }),
-                              h(IconButton, {
-                                name: 'spark',
-                                label: t('commit.generate'),
-                                hint: generating ? t('commit.generating') : t('commit.generateHint'),
-                                busy: generating,
-                                disabled: busy || generating || files.length === 0,
-                                onClick: () => void generateMessage(),
-                              }),
-                            ),
                           ),
                           clean
                             ? null
-                            : h('textarea', {
-                                className: 'gctl-textarea',
-                                rows: 3,
-                                value: message,
-                                placeholder: t('commit.placeholder'),
-                                'aria-label': t('commit.placeholder'),
-                                onChange: (event) => setMessage(event.target.value),
-                              }),
+                            : h(
+                                'div',
+                                { className: 'gctl-textareaWrap' },
+                                h('textarea', {
+                                  className: 'gctl-textarea',
+                                  rows: 3,
+                                  value: message,
+                                  placeholder: t('commit.placeholder'),
+                                  'aria-label': t('commit.placeholder'),
+                                  onChange: (event) => setMessage(event.target.value),
+                                }),
+                                h(
+                                  'span',
+                                  { className: 'gctl-textareaSpark' },
+                                  h(IconButton, {
+                                    name: 'spark',
+                                    label: t('commit.generate'),
+                                    hint: generating ? t('commit.generating') : t('commit.generateHint'),
+                                    busy: generating,
+                                    disabled: busy || generating || files.length === 0,
+                                    onClick: () => void generateMessage(),
+                                  }),
+                                ),
+                              ),
+                          clean
+                            ? null
+                            : h(
+                                'div',
+                                { className: 'gctl-stageAllRow' },
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    className: 'gctl-stageAllButton',
+                                    disabled: busy || files.length === 0 || files.every((file) => file.staged),
+                                    onClick: () => void stageAll(),
+                                  },
+                                  h(Glyph, { name: 'stage', size: 14 }),
+                                  h('span', null, t('commit.stageAll')),
+                                  h('span', { className: 'gctl-buttonDivider' }),
+                                  h(Glyph, { name: 'chevronDown', size: 12 }),
+                                ),
+                              ),
                           h(
                             'div',
                             { className: 'gctl-commitActions' },
@@ -958,24 +1144,36 @@ window.__ModuleLoader__.load({
                           title: t('group.conflicts'),
                           rows: conflictedFiles,
                           actions: [stageActions, diffActions],
+                          headerActions: [],
                         }),
                         renderGroup({
                           key: 'staged',
                           title: t('group.staged'),
                           rows: stagedFiles,
                           actions: [unstageActions, diffActions],
+                          headerActions: [
+                            { id: 'unstage-all', icon: 'unstage', label: t('action.unstage'), hint: t('action.unstage'), run: unstageAllStaged },
+                          ],
                         }),
                         renderGroup({
                           key: 'changes',
                           title: t('group.changes'),
                           rows: changedFiles,
                           actions: [stageActions, diffActions, discardActions],
+                          headerActions: [
+                            { id: 'discard-changes', icon: 'revert', label: t('action.discard'), hint: t('action.discard'), destructive: true, run: discardAllChanged },
+                            { id: 'stage-changes', icon: 'stage', label: t('action.stage'), hint: t('action.stage'), run: stageAllChanged },
+                          ],
                         }),
                         renderGroup({
                           key: 'untracked',
                           title: t('group.untracked'),
                           rows: untrackedFiles,
                           actions: [stageActions, diffActions, discardActions],
+                          headerActions: [
+                            { id: 'discard-untracked', icon: 'trash', label: t('action.discard'), hint: t('action.discard'), destructive: true, run: discardAllUntracked },
+                            { id: 'stage-untracked', icon: 'stage', label: t('action.stage'), hint: t('action.stage'), run: stageAllUntracked },
+                          ],
                         }),
                         files.length === 0 ? h('p', { className: 'gctl-hint' }, t('changes.clean')) : null,
                         selected === null
@@ -1358,13 +1556,38 @@ window.__ModuleLoader__.load({
 @keyframes gctl-pulse{50%{opacity:.45}}
 .gctl-textarea,.gctl-input{width:100%;border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;padding:8px 10px;resize:vertical}
 .gctl-textarea:focus,.gctl-input:focus{border-color:var(--dsw-alias-brand-primary)}
+.gctl-textareaWrap{position:relative;width:100%}
+.gctl-textareaWrap .gctl-textarea{padding-right:38px}
+.gctl-textareaSpark{position:absolute;top:6px;right:6px;z-index:2}
+.gctl-stageAllRow{margin-top:10px;display:flex}
+.gctl-stageAllButton{width:100%;height:32px;background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;padding:0 12px;gap:8px}
+.gctl-stageAllButton:hover:not(:disabled){background:var(--dsw-alias-bg-layer-3)}
+.gctl-stageAllButton:disabled{color:var(--dsw-alias-state-idle-primary);cursor:default}
+.gctl-buttonDivider{width:1px;height:16px;background:var(--dsw-alias-border-l2);margin-left:auto;margin-right:2px}
 .gctl-commitActions{justify-content:space-between;align-items:center;gap:12px;margin-top:10px;display:flex}
 .gctl-group{margin-bottom:18px}
-.gctl-groupTitle{float:none;align-items:center;gap:8px;margin:0 0 6px;font-size:13px;font-weight:500;display:flex}
+.gctl-groupHead{display:flex;align-items:center;justify-content:space-between;padding:4px 6px;margin:8px 0 4px;border-radius:6px;cursor:pointer;user-select:none}
+.gctl-groupHead:hover{background:var(--dsw-alias-bg-layer-1)}
+.gctl-groupTitleWrap{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--dsw-alias-label-secondary)}
+.gctl-groupChevron{color:var(--dsw-alias-label-secondary);flex:none}
+.gctl-groupTitle{float:none;margin:0}
+.gctl-groupActions{display:inline-flex;align-items:center;gap:2px}
+.gctl-viewAll{font-size:12px;color:var(--dsw-alias-label-secondary);margin-left:4px;cursor:pointer}
+.gctl-viewAll:hover{color:var(--dsw-alias-label-primary)}
 .gctl-count{border-radius:9px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;padding:0 6px;line-height:18px}
 .gctl-rows{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px}
-.gctl-row{border-radius:10px;align-items:center;gap:10px;padding:5px 8px;display:flex}
+.gctl-row{border-radius:8px;align-items:center;gap:8px;padding:5px 8px;display:flex;cursor:pointer}
 .gctl-row:hover{background:var(--dsw-alias-bg-layer-1)}
+.gctl-rowActive{background:var(--dsw-alias-bg-layer-2)}
+.gctl-fileIcon{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex:none}
+.gctl-fileDetails{flex:1;min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden}
+.gctl-fileName{color:var(--dsw-alias-label-primary);font-size:13px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.gctl-fileDir{color:var(--dsw-alias-label-secondary);font-size:12px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.gctl-rowTail{flex:none;display:flex;align-items:center;gap:8px;margin-left:auto}
+.gctl-statusTag{font-weight:700;font-size:12px;min-width:14px;text-align:right}
+.gctl-statusTag-ok{color:var(--dsw-alias-state-success-primary)}
+.gctl-statusTag-warn{color:var(--dsw-alias-state-warning-primary)}
+.gctl-statusTag-bad{color:var(--dsw-alias-state-error-primary)}
 .gctl-code{width:22px;flex:none;color:var(--dsw-alias-label-secondary);text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;letter-spacing:-.5px}
 .gctl-codeCurrent{color:var(--dsw-alias-state-success-primary)}
 .gctl-path{flex:1;min-width:0;overflow-wrap:anywhere;font-size:13px}
