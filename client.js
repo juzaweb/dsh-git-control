@@ -478,7 +478,7 @@ window.__ModuleLoader__.load({
       const [revision, setRevision] = React.useState(0);
       const [tab, setTab] = React.useState('changes');
       const [busy, setBusy] = React.useState(false);
-      const [notice, setNotice] = React.useState(null);
+      const [error, setError] = React.useState(null);
       const [message, setMessage] = React.useState('');
       const [stashMessage, setStashMessage] = React.useState('');
       const [stashUntracked, setStashUntracked] = React.useState(true);
@@ -517,7 +517,7 @@ window.__ModuleLoader__.load({
             if (controller.signal.aborted) return;
             setStatus(null);
             setPhase('error');
-            setNotice({ kind: 'error', ...failureOf(error) });
+            setError(failureOf(error));
           });
         return () => controller.abort();
       }, [chosenPath, revision]);
@@ -530,17 +530,17 @@ window.__ModuleLoader__.load({
           setBranches(null);
           callApi({ action: 'branches', path: chosenPath }, controller.signal)
             .then((data) => { if (!controller.signal.aborted) setBranches(data); })
-            .catch((error) => { if (!controller.signal.aborted) setNotice({ kind: 'error', ...failureOf(error) }); });
+            .catch((error) => { if (!controller.signal.aborted) setError(failureOf(error)); });
         } else if (tab === 'history') {
           setCommits(null);
           callApi({ action: 'log', path: chosenPath, limit: logLimit }, controller.signal)
             .then((data) => { if (!controller.signal.aborted) setCommits(data.commits); })
-            .catch((error) => { if (!controller.signal.aborted) setNotice({ kind: 'error', ...failureOf(error) }); });
+            .catch((error) => { if (!controller.signal.aborted) setError(failureOf(error)); });
         } else if (tab === 'stash') {
           setStashes(null);
           callApi({ action: 'stashList', path: chosenPath }, controller.signal)
             .then((data) => { if (!controller.signal.aborted) setStashes(data.stashes); })
-            .catch((error) => { if (!controller.signal.aborted) setNotice({ kind: 'error', ...failureOf(error) }); });
+            .catch((error) => { if (!controller.signal.aborted) setError(failureOf(error)); });
         }
         return () => controller.abort();
       }, [tab, chosenPath, revision, logLimit, status === null]);
@@ -572,17 +572,14 @@ window.__ModuleLoader__.load({
        */
       const execute = async (body) => {
         setBusy(true);
-        setNotice(null);
+        setError(null);
         try {
           const data = await callApi(body);
           if (data !== null && data.status !== undefined) setStatus(data.status);
-          if (data !== null && typeof data.message === 'string') {
-            setNotice({ kind: 'success', message: data.message });
-          }
           setRevision((current) => current + 1);
           return data;
-        } catch (error) {
-          setNotice({ kind: 'error', ...failureOf(error) });
+        } catch (err) {
+          setError(failureOf(err));
           return null;
         } finally {
           setBusy(false);
@@ -623,15 +620,14 @@ window.__ModuleLoader__.load({
       /** Ask the host for a commit message written from the current diff. */
       const generateMessage = async () => {
         setGenerating(true);
-        setNotice(null);
+        setError(null);
         try {
           const data = await callApi({ action: 'generateCommitMessage', path: chosenPath });
           if (typeof data?.message === 'string' && data.message !== '') {
             setMessage(data.message);
-            setNotice({ kind: 'success', message: t('commit.generated') });
           }
-        } catch (error) {
-          setNotice({ kind: 'error', ...failureOf(error) });
+        } catch (err) {
+          setError(failureOf(err));
         } finally {
           setGenerating(false);
         }
@@ -772,6 +768,22 @@ window.__ModuleLoader__.load({
                 }
               : null;
 
+
+      /**
+       * Render error details below an input or group.
+       * @returns the error element or null.
+       */
+      const renderError = () => (
+        error === null
+          ? null
+          : h(
+              'div',
+              { className: 'gctl-inputError', role: 'alert' },
+              h('div', null, error.message ?? t('notice.failed')),
+              error.command === undefined || error.command === null ? null : h('code', { className: 'gctl-command' }, error.command),
+              error.stderr === undefined || error.stderr === null ? null : h('pre', { className: 'gctl-stderr' }, error.stderr),
+            )
+      );
 
       /**
        * Render one file group.
@@ -936,7 +948,10 @@ window.__ModuleLoader__.load({
           role: 'tab',
           'aria-selected': tab === id,
           className: tab === id ? 'gctl-tab gctl-tabActive' : 'gctl-tab',
-          onClick: () => setTab(id),
+          onClick: () => {
+            setTab(id);
+            setError(null);
+          },
         },
         label,
       );
@@ -972,6 +987,7 @@ window.__ModuleLoader__.load({
                           onChange: (event) => {
                             setRepoPath(event.target.value);
                             setSelected(null);
+                            setError(null);
                           },
                         },
                         workspaces.map((workspace) => h('option', { key: workspace.workspaceId, value: workspace.path }, workspace.title)),
@@ -987,22 +1003,16 @@ window.__ModuleLoader__.load({
               ),
             ),
 
-            notice === null
-              ? null
-              : h(
-                  'div',
-                  { className: notice.kind === 'error' ? 'gctl-notice gctl-noticeError' : 'gctl-notice', role: 'status' },
-                  h('div', null, notice.message ?? t('notice.failed')),
-                  notice.command === undefined || notice.command === null ? null : h('code', { className: 'gctl-command' }, notice.command),
-                  notice.stderr === undefined || notice.stderr === null ? null : h('pre', { className: 'gctl-stderr' }, notice.stderr),
-                ),
-
             chosenPath === null
               ? h('p', { className: 'gctl-hint' }, t('repository.none'))
               : null,
 
             phase === 'loading' && status === null
               ? h('p', { className: 'gctl-hint' }, t('loading'))
+              : null,
+
+            phase === 'error' && status === null
+              ? h('p', { className: 'gctl-hint gctl-hintBad' }, error?.message ?? t('notice.failed'))
               : null,
 
             status === null
@@ -1105,13 +1115,16 @@ window.__ModuleLoader__.load({
                                 'div',
                                 { className: 'gctl-textareaWrap' },
                                 h('textarea', {
-                                  className: generating ? 'gctl-textarea gctl-textareaGenerating' : 'gctl-textarea',
+                                  className: `${generating ? 'gctl-textarea gctl-textareaGenerating' : 'gctl-textarea'}${error !== null ? ' gctl-textareaError' : ''}`,
                                   rows: 3,
                                   value: message,
                                   placeholder: t('commit.placeholder'),
                                   'aria-label': t('commit.placeholder'),
                                   readOnly: generating,
-                                  onChange: (event) => setMessage(event.target.value),
+                                  onChange: (event) => {
+                                    setMessage(event.target.value);
+                                    if (error !== null) setError(null);
+                                  },
                                   onKeyDown: (event) => {
                                     if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
                                       if (mainAction !== null && !mainAction.disabled) {
@@ -1134,6 +1147,7 @@ window.__ModuleLoader__.load({
                                   }),
                                 ),
                               ),
+                          renderError(),
                           mainAction === null
                             ? null
                             : h(
@@ -1230,11 +1244,14 @@ window.__ModuleLoader__.load({
                           { className: 'gctl-createRow' },
                           h('input', {
                             type: 'text',
-                            className: 'gctl-input',
+                            className: `gctl-input${error !== null ? ' gctl-inputErrorState' : ''}`,
                             value: newBranch,
                             placeholder: t('branches.new.placeholder'),
                             'aria-label': t('branches.new.placeholder'),
-                            onChange: (event) => setNewBranch(event.target.value),
+                            onChange: (event) => {
+                              setNewBranch(event.target.value);
+                              if (error !== null) setError(null);
+                            },
                           }),
                           h(
                             'label',
@@ -1260,6 +1277,7 @@ window.__ModuleLoader__.load({
                             t('branches.new.action'),
                           ),
                         ),
+                        renderError(),
                         branches === null
                           ? h('p', { className: 'gctl-hint' }, t('loading'))
                           : h(
@@ -1336,6 +1354,7 @@ window.__ModuleLoader__.load({
                     ? h(
                         'div',
                         null,
+                        renderError(),
                         commits === null
                           ? h('p', { className: 'gctl-hint' }, t('loading'))
                           : commits.length === 0
@@ -1417,11 +1436,14 @@ window.__ModuleLoader__.load({
                           { className: 'gctl-createRow' },
                           h('input', {
                             type: 'text',
-                            className: 'gctl-input',
+                            className: `gctl-input${error !== null ? ' gctl-inputErrorState' : ''}`,
                             value: stashMessage,
                             placeholder: t('stash.message.placeholder'),
                             'aria-label': t('stash.message.placeholder'),
-                            onChange: (event) => setStashMessage(event.target.value),
+                            onChange: (event) => {
+                              setStashMessage(event.target.value);
+                              if (error !== null) setError(null);
+                            },
                           }),
                           h(
                             'label',
@@ -1452,6 +1474,7 @@ window.__ModuleLoader__.load({
                             t('stash.save'),
                           ),
                         ),
+                        renderError(),
                         stashes === null
                           ? h('p', { className: 'gctl-hint' }, t('loading'))
                           : stashes.length === 0
@@ -1546,6 +1569,10 @@ window.__ModuleLoader__.load({
 .gctl-dangerSolid{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
 .gctl-notice{border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);margin-bottom:16px;padding:10px 12px;font-size:13px}
 .gctl-noticeError{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
+.gctl-inputError{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.4;margin:6px 0;overflow-wrap:anywhere}
+.gctl-inputError .gctl-command{margin-top:4px;font-size:11px;opacity:.85}
+.gctl-inputError .gctl-stderr{margin-top:4px;font-size:11px;color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 8%,transparent);border-radius:6px;padding:6px 8px;max-height:120px}
+.gctl-textareaError,.gctl-inputErrorState{border-color:var(--dsw-alias-state-error-primary)!important}
 .gctl-command,.gctl-stderr,.gctl-diffPre,.gctl-hash,.gctl-root{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .gctl-command{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;margin-top:6px;font-size:12px;display:block}
 .gctl-stderr{color:var(--dsw-alias-label-secondary);white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;margin:6px 0 0;font-size:12px;overflow:auto}
