@@ -23,6 +23,8 @@ window.__ModuleLoader__.load({
     const MAX_RENDERED_LINES = 2000;
     /** History page step. */
     const LOG_STEP = 40;
+    /** Polling interval when the panel is open and visible. */
+    const POLL_INTERVAL_MS = 3000;
 
     const DICTIONARY = {
       'type.label': 'Git',
@@ -484,6 +486,8 @@ window.__ModuleLoader__.load({
       const [stashUntracked, setStashUntracked] = React.useState(true);
       const [selected, setSelected] = React.useState(null);
       const [diff, setDiff] = React.useState(null);
+      const prevSelectedRef = React.useRef(null);
+      const isBusyOrInFlightRef = React.useRef(false);
       const [branches, setBranches] = React.useState(null);
       const [commits, setCommits] = React.useState(null);
       const [logLimit, setLogLimit] = React.useState(LOG_STEP);
@@ -497,6 +501,7 @@ window.__ModuleLoader__.load({
       const toggleGroup = (key) => setCollapsedGroups((current) => ({ ...current, [key]: !current[key] }));
 
       const chosenPath = fixedPath ?? repoPath ?? (workspaces.length > 0 ? workspaces[0].path : null);
+      isBusyOrInFlightRef.current = busy || generating || confirm !== null || phase === 'refreshing' || phase === 'loading';
 
       /* Read the status of the selected repository. */
       React.useEffect(() => {
@@ -515,29 +520,101 @@ window.__ModuleLoader__.load({
           })
           .catch((error) => {
             if (controller.signal.aborted) return;
-            setStatus(null);
+            setStatus((current) => (current === null ? null : current));
             setPhase('error');
             setError(failureOf(error));
           });
         return () => controller.abort();
       }, [chosenPath, revision]);
 
+      /* Auto-refresh repository state continuously while the panel is open and visible. */
+      React.useEffect(() => {
+        if (chosenPath === null) return undefined;
+
+        let timer = null;
+        let lastPing = Date.now();
+
+        const ping = () => {
+          if (document.hidden || isBusyOrInFlightRef.current) return;
+          const now = Date.now();
+          if (now - lastPing < 1000) return;
+          lastPing = now;
+          setRevision((current) => current + 1);
+        };
+
+        const startPolling = () => {
+          if (timer === null) {
+            timer = setInterval(ping, POLL_INTERVAL_MS);
+          }
+        };
+
+        const stopPolling = () => {
+          if (timer !== null) {
+            clearInterval(timer);
+            timer = null;
+          }
+        };
+
+        const onVisibilityChange = () => {
+          if (document.visibilityState === 'visible') {
+            ping();
+            startPolling();
+          } else {
+            stopPolling();
+          }
+        };
+
+        const onFocus = () => {
+          if (document.visibilityState === 'visible') {
+            ping();
+          }
+        };
+
+        if (document.visibilityState === 'visible') {
+          startPolling();
+        }
+
+        window.addEventListener('focus', onFocus);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+
+        return () => {
+          stopPolling();
+          window.removeEventListener('focus', onFocus);
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+      }, [chosenPath]);
+
+      /* Keep the selected diff target in sync with updated file status. */
+      React.useEffect(() => {
+        if (selected === null || status === null) return;
+        const matching = status.files.find((file) => file.path === selected.path);
+        if (!matching) {
+          setSelected(null);
+        } else if (Boolean(matching.staged) !== Boolean(selected.staged) || Boolean(matching.untracked) !== Boolean(selected.untracked)) {
+          setSelected({ path: matching.path, staged: Boolean(matching.staged), untracked: Boolean(matching.untracked) });
+        }
+      }, [status]);
+
+      /* Reset tab data when switching tabs or changing repository. */
+      React.useEffect(() => {
+        setBranches(null);
+        setCommits(null);
+        setStashes(null);
+      }, [tab, chosenPath]);
+
       /* Read the active tab's own data. */
       React.useEffect(() => {
         if (chosenPath === null || status === null) return undefined;
         const controller = new AbortController();
         if (tab === 'branches') {
-          setBranches(null);
           callApi({ action: 'branches', path: chosenPath }, controller.signal)
             .then((data) => { if (!controller.signal.aborted) setBranches(data); })
             .catch((error) => { if (!controller.signal.aborted) setError(failureOf(error)); });
         } else if (tab === 'history') {
-          setCommits(null);
           callApi({ action: 'log', path: chosenPath, limit: logLimit }, controller.signal)
             .then((data) => { if (!controller.signal.aborted) setCommits(data.commits); })
             .catch((error) => { if (!controller.signal.aborted) setError(failureOf(error)); });
         } else if (tab === 'stash') {
-          setStashes(null);
           callApi({ action: 'stashList', path: chosenPath }, controller.signal)
             .then((data) => { if (!controller.signal.aborted) setStashes(data.stashes); })
             .catch((error) => { if (!controller.signal.aborted) setError(failureOf(error)); });
@@ -548,11 +625,20 @@ window.__ModuleLoader__.load({
       /* Read the selected comparison. */
       React.useEffect(() => {
         if (selected === null || chosenPath === null) {
+          prevSelectedRef.current = null;
           setDiff(null);
           return undefined;
         }
+        const isSameFile = prevSelectedRef.current?.path === selected.path &&
+          prevSelectedRef.current?.staged === selected.staged &&
+          prevSelectedRef.current?.untracked === selected.untracked;
+        prevSelectedRef.current = selected;
+
         const controller = new AbortController();
-        setDiff({ phase: 'loading', data: null });
+        setDiff((current) => ({
+          phase: 'loading',
+          data: isSameFile ? (current?.data ?? null) : null,
+        }));
         callApi({
           action: 'diff',
           path: chosenPath,
@@ -1226,7 +1312,7 @@ window.__ModuleLoader__.load({
                                 h('span', { className: 'gctl-diffTitle' }, `${selected.path} · ${selected.untracked ? t('diff.untracked') : selected.staged ? t('diff.staged') : t('diff.unstaged')}`),
                                 h(IconButton, { name: 'close', label: t('action.close'), onClick: () => setSelected(null) }),
                               ),
-                              diff === null || diff.phase === 'loading'
+                              diff === null || (diff.phase === 'loading' && diff.data === null)
                                 ? h('p', { className: 'gctl-hint' }, t('loading'))
                                 : diff.phase === 'error'
                                   ? h('p', { className: 'gctl-hint' }, diff.failure.message)
