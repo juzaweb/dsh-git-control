@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
     const DICTIONARY = {
       'type.label': 'Git',
       'guide.title': 'Git control',
-      'guide.description': 'Review, stage, and commit this workspace\'s changes, manage branches and stashes, and sync with the remote.',
+      'guide.description': 'Review, stage, and commit the changes in this session\'s directory, manage branches and stashes, and sync with the remote.',
       title: 'Git Control',
       working: 'Working…',
       refresh: 'Refresh',
@@ -135,7 +135,7 @@ window.__ModuleLoader__.load({
       'commit.pushAction': 'Push {count} commit(s)',
       'commit.pullAction': 'Pull {count} commit(s)',
       'notice.failed': 'The git command failed.',
-      'view.noWorkspace': 'This session has no workspace directory to inspect.',
+      'view.noDirectory': 'This session has no working directory to inspect.',
     };
 
     /**
@@ -1785,26 +1785,37 @@ window.__ModuleLoader__.load({
 `;
 
     /**
-     * Render the right-Sidebar tab body for the open Session's workspace.
-     * @param props - slot props: localized copy, the workspace hook, and the Session id.
-     * @returns the compact panel, or a hint when the Session has no workspace.
+     * Render the right-Sidebar tab body for the open Session's working
+     * directory. The directory the Session runs in is the repository the panel
+     * drives, so a Session that moved into a Git worktree inspects that
+     * worktree instead of the Workspace it was opened from. The Workspace path
+     * is the fallback for a Session that reports no directory yet.
+     * @param props - slot props: localized copy, the workspace and session
+     * selector hooks, and the Session id.
+     * @returns the compact panel, or a hint when no directory is known.
      */
     function GitRightPane(props) {
-      const { t, useWorkspaces, sessionId } = props;
+      const { t, useWorkspaces, useSessions, sessionId } = props;
       const workspaces = useWorkspaces === undefined
         ? []
         : useWorkspaces((snapshot) => snapshot.items);
+      const sessionDirectory = useSessions === undefined
+        ? undefined
+        : useSessions((sessions) => sessions.byId[sessionId]?.cwd);
       const workspace = workspaces.find((entry) => entry.sessionIds.includes(sessionId));
+      const directory = typeof sessionDirectory === 'string' && sessionDirectory !== ''
+        ? sessionDirectory
+        : workspace?.path;
 
-      if (workspace === undefined) {
+      if (typeof directory !== 'string' || directory === '') {
         return h(
           'section',
           { className: 'gctl-page gctl-compact' },
           h('style', null, PAGE_CSS),
-          h('div', { className: 'gctl-content' }, h('p', { className: 'gctl-hint' }, t('view.noWorkspace'))),
+          h('div', { className: 'gctl-content' }, h('p', { className: 'gctl-hint' }, t('view.noDirectory'))),
         );
       }
-      return h(GitControlPage, { t, useWorkspaces, fixedPath: workspace.path, compact: true });
+      return h(GitControlPage, { t, useWorkspaces, fixedPath: directory, compact: true });
     }
 
     /**

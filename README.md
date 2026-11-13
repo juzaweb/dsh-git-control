@@ -7,15 +7,18 @@ them, manage branches and stashes, and sync with the remote.
 ## Where it lives
 
 One surface: a **tab in the right Sidebar**, next to Workspace files, Terminal,
-and Session Log. The tab is scoped to the open Session's workspace repository,
-so it follows whichever workspace the Session belongs to and shows no picker.
+and Session Log. The tab is scoped to the open Session's working directory, so
+it follows that Session into a Git worktree and shows no picker.
 
 Open it from the right Sidebar's **Start** (guide) page: pick the
 **Git control** card. The tab chip reads **Git** and the panel keeps the
 Sidebar's narrow layout.
 
 Any directory that git recognises works: the Host resolves
-`git rev-parse --show-toplevel` and every later command runs at that root.
+`git rev-parse --show-toplevel` and every later command runs at that root. The
+directory is the one the Session reports, so a Session moved into a linked
+worktree inspects that worktree; the Workspace path is only the fallback while
+the Session reports none.
 
 ## What it does
 
@@ -105,6 +108,7 @@ namespace and translates them through `ctx.locale`. The Host half exposes
 
 The tab type registers through `ctx.inject(['sidebarRightTabs'], …)` so it
 survives a load order where the right Sidebar mounts after this bundle. Its body
-reads the open Session id from the slot's standard props and maps it to a
-workspace through `useWorkspaces`; a Session outside every workspace shows a
-hint instead of calling git.
+reads the open Session id from the slot's standard props, takes that Session's
+working directory from `useSessions`, and falls back to the matching Workspace
+path from `useWorkspaces` while the Session reports no directory. A Session with
+neither shows a hint instead of calling git.
