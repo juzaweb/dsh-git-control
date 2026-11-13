@@ -24,7 +24,7 @@ the Session reports none.
 
 | Panel tab | Operations |
 | --- | --- |
-| Changes | read status, per-file diff (staged, unstaged, or an untracked preview), stage, unstage, discard, stage everything, write the commit message, commit |
+| Changes | read status, per-file diff (staged, unstaged, or an untracked preview), a before/after image preview for image files, stage, unstage, discard, stage everything, write the commit message, commit |
 | Branches | list local and remote branches, create (optionally switching), switch, delete |
 | History | newest-first log, revert a commit, reset the branch to a commit with soft / mixed / hard |
 | Stash | save (optionally including untracked files), list, apply, pop, drop |
@@ -32,6 +32,15 @@ the Session reports none.
 Row actions, the history actions, and the sync controls are **icon-only**: each
 keeps its name in `aria-label`, repeats it in the `title` hint, and stays a full
 hit target. Destructive ones are drawn in the error colour.
+
+Selecting an image file (`png`, `jpg`, `jpeg`, `jfif`, `gif`, `webp`, `bmp`,
+`ico`, `avif`, `svg`) opens a preview instead of a textual diff: the old and the
+new bytes sit side by side under **Before** / **After** captions carrying the
+byte size and, once loaded, the pixel dimensions. The old side is `HEAD` for a
+staged path and the index for a working-tree path; the new side is the index or
+the work tree. A side that holds no file shows *Not in this version*, an
+untracked image shows one **New file** pane, and a side above 8 MiB is named
+rather than fetched. A conflicted image keeps the textual fallback.
 
 The commit card is shaped by the repository state:
 
@@ -73,8 +82,15 @@ command it will run. The dialog closes on Escape or a click outside it.
 
 - **Argv only.** Commands are spawned as argument arrays through
   `ctx.subprocess`; no shell, no string interpolation.
-- **Owner only.** The single Host route `POST /api/git-control` sits behind the
-  Connection fence, so only the authenticated browser session reaches it.
+- **Owner only.** The two Host routes — `POST /api/git-control` for operations
+  and `GET /api/git-control/blob` for image bytes — sit behind the Connection
+  fence, so only the authenticated browser session reaches them.
+- **Images only on the blob route.** A preview request must name an extension
+  from the image allowlist; anything else is refused with 415, and a path that
+  escapes the repository with 404. A work-tree side must stay inside the
+  repository root, and bytes are capped at 8 MiB (413 above that). Responses
+  carry `nosniff`, a sandbox CSP, and `private` caching keyed by the content
+  token in the URL.
 - **Path and ref validation.** Requested paths must be repository-relative,
   must not start with `-`, and must not contain `..` segments; branch names,
   commit hashes, stash references, and reset modes are matched against fixed
@@ -94,7 +110,7 @@ command it will run. The dialog closes on Escape or a click outside it.
 ## Layout
 
 ```
-index.js          Host half: GitControl service, validation, and the fetch route
+index.js          Host half: GitControl service, validation, and the two fetch routes
 client.js         Client half: the right-Sidebar tab type, its body, and its title
 cordis.patch.yml  Bundle patch inserting the `git-control` row
 locale/en.json    Panel dictionary and bundle display metadata

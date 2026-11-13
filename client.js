@@ -19,6 +19,8 @@ window.__ModuleLoader__.load({
     const TAB_KIND = 'git';
     /** Host route backing every operation. */
     const ENDPOINT = 'api/git-control';
+    /** Host route serving one image side as raw bytes. */
+    const BLOB_ENDPOINT = 'api/git-control/blob';
     /** Rendered diff ceiling. */
     const MAX_RENDERED_LINES = 2000;
     /** History page step. */
@@ -74,6 +76,11 @@ window.__ModuleLoader__.load({
       'diff.empty': 'No textual difference.',
       'diff.truncated': 'Output was shortened.',
       'diff.linesTruncated': 'Only the first {count} lines are shown.',
+      'diff.imageBefore': 'Before',
+      'diff.imageAfter': 'After',
+      'diff.imageMissing': 'Not in this version.',
+      'diff.imageTooLarge': 'Too large to preview ({size}).',
+      'diff.imageFailed': 'The image could not be loaded.',
       'branches.new.placeholder': 'New branch name',
       'branches.new.checkout': 'Switch to the new branch',
       'branches.new.action': 'Create branch',
@@ -187,6 +194,9 @@ window.__ModuleLoader__.load({
     function DiffBody({ t, diff }) {
       const data = diff.data;
       if (data === null || data === undefined) return null;
+      if (data.kind === 'image') {
+        return h(ImageDiff, { t, data });
+      }
       if (data.binary === true) {
         return h('p', { className: 'gctl-hint' }, t('diff.binary'));
       }
@@ -219,6 +229,115 @@ window.__ModuleLoader__.load({
         lines.length > MAX_RENDERED_LINES
           ? h('p', { className: 'gctl-hint' }, t('diff.linesTruncated', { count: MAX_RENDERED_LINES }))
           : null,
+      );
+    }
+
+    /**
+     * Format a byte count for the panel.
+     * @param bytes - size in bytes.
+     * @returns a short human-readable size.
+     */
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes) || bytes < 0) return '';
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 1024 * 100 ? 1 : 0)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    /**
+     * Build the blob URL for one image side. The content token changes with the
+     * bytes, so the browser never reuses a stale preview after an edit.
+     * @param root - absolute repository root.
+     * @param meta - side facts: `{ side, path, token }`.
+     * @returns the route URL.
+     */
+    function imageUrl(root, meta) {
+      const params = new URLSearchParams({
+        path: root,
+        file: meta.path,
+        side: meta.side,
+        token: meta.token,
+      });
+      return `${BLOB_ENDPOINT}?${params.toString()}`;
+    }
+
+    /**
+     * Render one side of an image comparison.
+     * @param props - side label, repository root, side facts, and whether it stands alone.
+     * @returns the pane element.
+     */
+    function ImagePane({ t, label, root, meta, single }) {
+      const [state, setState] = React.useState('loading');
+      const [size, setSize] = React.useState(null);
+      const token = meta === null || meta === undefined ? null : meta.token;
+
+      React.useEffect(() => {
+        setState('loading');
+        setSize(null);
+      }, [token]);
+
+      if (meta === null || meta === undefined) {
+        return h(
+          'div',
+          { className: 'gctl-imagePane gctl-imagePaneEmpty' },
+          h('div', { className: 'gctl-imagePaneHead' }, h('span', { className: 'gctl-imageLabel' }, label)),
+          h('p', { className: 'gctl-hint' }, t('diff.imageMissing')),
+        );
+      }
+
+      const caption = `${formatBytes(meta.size)}${size === null ? '' : ` · ${size.width}×${size.height}`}`;
+      return h(
+        'div',
+        { className: 'gctl-imagePane' },
+        h(
+          'div',
+          { className: 'gctl-imagePaneHead' },
+          h('span', { className: 'gctl-imageLabel' }, label),
+          h('span', { className: 'gctl-imageMeta' }, caption),
+        ),
+        meta.previewable === false
+          ? h('p', { className: 'gctl-hint' }, t('diff.imageTooLarge', { size: formatBytes(meta.size) }))
+          : h(
+              'div',
+              { className: single ? 'gctl-imageFrame gctl-imageFrameSingle' : 'gctl-imageFrame' },
+              state === 'failed'
+                ? h('p', { className: 'gctl-hint gctl-hintBad' }, t('diff.imageFailed'))
+                : h('img', {
+                    className: 'gctl-image',
+                    src: imageUrl(root, meta),
+                    alt: `${label} ${meta.path}`,
+                    decoding: 'async',
+                    referrerPolicy: 'no-referrer',
+                    onLoad: (event) => {
+                      setState('ready');
+                      setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight });
+                    },
+                    onError: () => setState('failed'),
+                  }),
+            ),
+      );
+    }
+
+    /**
+     * Render one image comparison: the old and the new bytes side by side, or a
+     * single pane for a file git does not track yet.
+     * @param props - image payload and localized copy.
+     * @returns the preview block.
+     */
+    function ImageDiff({ t, data }) {
+      const root = data.root;
+      if (data.untracked === true) {
+        return h(
+          'div',
+          { className: 'gctl-imagePair gctl-imageSingle' },
+          h(ImagePane, { t, root, label: t('diff.untracked'), meta: data.new, single: true }),
+        );
+      }
+      return h(
+        'div',
+        { className: 'gctl-imagePair' },
+        h(ImagePane, { t, root, label: t('diff.imageBefore'), meta: data.old, single: false }),
+        h(ImagePane, { t, root, label: t('diff.imageAfter'), meta: data.new, single: false }),
       );
     }
 
@@ -590,8 +709,22 @@ window.__ModuleLoader__.load({
         const matching = status.files.find((file) => file.path === selected.path);
         if (!matching) {
           setSelected(null);
-        } else if (Boolean(matching.staged) !== Boolean(selected.staged) || Boolean(matching.untracked) !== Boolean(selected.untracked)) {
-          setSelected({ path: matching.path, staged: Boolean(matching.staged), untracked: Boolean(matching.untracked) });
+          return;
+        }
+        const next = {
+          path: matching.path,
+          staged: Boolean(matching.staged),
+          untracked: Boolean(matching.untracked),
+          conflicted: Boolean(matching.conflicted),
+          originalPath: matching.originalPath ?? null,
+        };
+        if (
+          next.staged !== Boolean(selected.staged)
+          || next.untracked !== Boolean(selected.untracked)
+          || next.conflicted !== Boolean(selected.conflicted)
+          || next.originalPath !== (selected.originalPath ?? null)
+        ) {
+          setSelected(next);
         }
       }, [status]);
 
@@ -645,6 +778,8 @@ window.__ModuleLoader__.load({
           file: selected.path,
           staged: selected.staged === true,
           untracked: selected.untracked === true,
+          conflicted: selected.conflicted === true,
+          originalPath: selected.originalPath ?? null,
         }, controller.signal)
           .then((data) => { if (!controller.signal.aborted) setDiff({ phase: 'ready', data }); })
           .catch((error) => { if (!controller.signal.aborted) setDiff({ phase: 'error', data: null, failure: failureOf(error) }); });
@@ -930,7 +1065,13 @@ window.__ModuleLoader__.load({
                   {
                     className: selected?.path === file.path ? 'gctl-row gctl-rowActive' : 'gctl-row',
                     key: `${file.code}:${file.path}`,
-                    onClick: () => setSelected({ path: file.path, staged: file.staged === true, untracked: file.untracked === true }),
+                    onClick: () => setSelected({
+                      path: file.path,
+                      staged: file.staged === true,
+                      untracked: file.untracked === true,
+                      conflicted: file.conflicted === true,
+                      originalPath: file.originalPath ?? null,
+                    }),
                   },
                   h('span', {
                     className: 'gctl-fileIcon',
@@ -973,7 +1114,13 @@ window.__ModuleLoader__.load({
         id: 'diff',
         icon: 'diff',
         label: file.untracked ? t('action.view') : t('action.diff'),
-        run: () => setSelected({ path: file.path, staged: file.staged === true, untracked: file.untracked === true }),
+        run: () => setSelected({
+          path: file.path,
+          staged: file.staged === true,
+          untracked: file.untracked === true,
+          conflicted: file.conflicted === true,
+          originalPath: file.originalPath ?? null,
+        }),
       });
 
       const stageActions = (file) => ({ id: 'stage', icon: 'stage', label: t('action.stage'), run: () => void toggleStage(file) });
@@ -1748,6 +1895,17 @@ window.__ModuleLoader__.load({
 .gctl-diffTitle{overflow-wrap:anywhere;font-size:13px}
 .gctl-diffBody{padding:8px 0}
 .gctl-diffPre{max-height:520px;color:var(--dsw-alias-label-primary);white-space:pre;margin:0;padding:0 12px;font-size:12px;line-height:1.5;overflow:auto;display:block}
+.gctl-imagePair{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px 12px}
+.gctl-imageSingle{grid-template-columns:1fr}
+.gctl-imagePane{border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base);min-width:0;overflow:hidden}
+.gctl-imagePaneHead{border-bottom:.5px solid var(--dsw-alias-border-l2);justify-content:space-between;align-items:baseline;gap:8px;padding:6px 10px;display:flex}
+.gctl-imageLabel{color:var(--dsw-alias-label-secondary);text-transform:uppercase;letter-spacing:.4px;font-size:11px;font-weight:600}
+.gctl-imageMeta{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-variant-numeric:tabular-nums;font-size:11px}
+.gctl-imageFrame{background:repeating-conic-gradient(var(--dsw-alias-bg-layer-1) 0% 25%,var(--dsw-alias-bg-base) 0% 50%) 50%/16px 16px;justify-content:center;align-items:center;min-height:140px;padding:8px;display:flex}
+.gctl-imageFrameSingle{min-height:180px}
+.gctl-image{object-fit:contain;max-width:100%;max-height:340px;display:block}
+.gctl-imagePane .gctl-hint{margin:0;padding:8px 10px;font-size:12px}
+.gctl-imagePaneEmpty{background:var(--dsw-alias-bg-base)}
 .gctl-line{display:block}
 .gctl-add{color:var(--dsw-alias-state-success-primary)}
 .gctl-del{color:var(--dsw-alias-state-error-primary)}
@@ -1778,10 +1936,13 @@ window.__ModuleLoader__.load({
 .gctl-compact .gctl-iconButton{min-width:24px;height:22px;padding:0 3px}
 .gctl-compact .gctl-rowActions{gap:0}
 .gctl-compact .gctl-mainActionButton{height:28px;font-size:12px;padding:0 8px}
+.gctl-compact .gctl-imagePair{gap:6px;padding:8px}
+.gctl-compact .gctl-imageFrame{min-height:110px;padding:6px}
+.gctl-compact .gctl-image{max-height:220px}
 .gctl-compact .gctl-textarea{font-size:12px}
 .gctl-compact .gctl-groupTitle{font-size:12px}
 .gctl-compact .gctl-button{height:26px;font-size:12px;padding:0 10px}
-@media (width<=760px){.gctl-content{padding:0 20px 48px}.gctl-headingActions{width:100%;justify-content:space-between}.gctl-select{max-width:100%}}
+@media (width<=760px){.gctl-content{padding:0 20px 48px}.gctl-headingActions{width:100%;justify-content:space-between}.gctl-select{max-width:100%}.gctl-imagePair{grid-template-columns:1fr}}
 `;
 
     /**

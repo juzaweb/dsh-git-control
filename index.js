@@ -19,6 +19,21 @@ const MAX_STDERR_BYTES = 1024 * 1024;
 /** Diff text ceilings handed to the panel. */
 const MAX_DIFF_CHARS = 400_000;
 const MAX_UNTRACKED_CHARS = 200_000;
+/** Largest image the panel previews; larger files are named instead of read. */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/** Extensions the panel previews as images, mapped to their media type. */
+const IMAGE_TYPES = new Map([
+  ['png', 'image/png'],
+  ['jpg', 'image/jpeg'],
+  ['jpeg', 'image/jpeg'],
+  ['jfif', 'image/jpeg'],
+  ['gif', 'image/gif'],
+  ['webp', 'image/webp'],
+  ['bmp', 'image/bmp'],
+  ['ico', 'image/x-icon'],
+  ['avif', 'image/avif'],
+  ['svg', 'image/svg+xml'],
+]);
 /** History page size and the cap on listed remote branches. */
 const DEFAULT_LOG_LIMIT = 40;
 const MAX_LOG_LIMIT = 200;
@@ -34,6 +49,8 @@ const MESSAGE_TIMEOUT_MS = 60_000;
 
 /** Authenticated Client route backing the panel. */
 const ROUTE_PATH = '/api/git-control';
+/** Authenticated route serving one image side as raw bytes. */
+const BLOB_PATH = '/api/git-control/blob';
 
 /** Branch names that the panel may create, switch to, or delete. */
 const BRANCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
@@ -194,6 +211,30 @@ function requireStashRef(value) {
 }
 
 /**
+ * Media type for a repository path the panel previews as an image.
+ * @param file - repository-relative path.
+ * @returns the media type, or null when the extension is not a known image.
+ */
+function imageMimeOf(file) {
+  const dot = file.lastIndexOf('.');
+  if (dot === -1 || dot === file.length - 1) return null;
+  return IMAGE_TYPES.get(file.slice(dot + 1).toLowerCase()) ?? null;
+}
+
+/**
+ * Build one plain-text response for the image route.
+ * @param status - HTTP status code.
+ * @param message - explanation for the panel's log.
+ * @returns the response.
+ */
+function imageFailure(status, message) {
+  return new Response(`${message}\n`, {
+    status,
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
+/**
  * Read records rendered by a `--format` that separates fields with the unit
  * separator and records with the record separator.
  * @param stdout - raw git output.
@@ -327,11 +368,12 @@ class GitControl {
    * Run one git command and collect its output.
    * @param cwd - directory git runs in.
    * @param args - argv tail, never shell-interpreted.
-   * @param options - signal, timeout, and accepted exit codes.
-   * @returns exit code plus collected stdout and stderr.
+   * @param options - signal, timeout, accepted exit codes, and whether stdout is
+   * raw bytes (`binary: true`) instead of decoded text.
+   * @returns exit code plus collected stdout (text) or bytes, and stderr.
    */
   async run(cwd, args, options = {}) {
-    const { signal, timeoutMs = LOCAL_TIMEOUT_MS, acceptCodes = [0] } = options;
+    const { signal, timeoutMs = LOCAL_TIMEOUT_MS, acceptCodes = [0], binary = false } = options;
     if (signal?.aborted) {
       throw gitFailure('git-control/cancelled', 'The request was cancelled.');
     }
@@ -353,7 +395,7 @@ class GitControl {
           cwd,
           stdio: {
             stdin: 'ignore',
-            stdout: { maxBytes: MAX_STDOUT_BYTES },
+            stdout: binary ? 'pipe' : { maxBytes: MAX_STDOUT_BYTES },
             stderr: { maxBytes: MAX_STDERR_BYTES },
           },
           graceMs: 2000,
@@ -369,9 +411,30 @@ class GitControl {
         throw gitFailure('git-control/spawn-failed', `git could not start: ${error instanceof Error ? error.message : String(error)}`);
       }
 
+      /* A piped stdout must be drained while the process runs, or the pipe
+         buffer fills and git blocks forever. */
+      const chunks = [];
+      let totalBytes = 0;
+      let overflow = false;
+      const drain = binary
+        ? (async () => {
+            if (handle.stdout === undefined) return;
+            for await (const chunk of handle.stdout) {
+              const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+              totalBytes += buffer.length;
+              if (totalBytes > MAX_IMAGE_BYTES) {
+                overflow = true;
+                handle.terminate();
+                return;
+              }
+              chunks.push(buffer);
+            }
+          })()
+        : Promise.resolve();
+
       let outcome;
       try {
-        outcome = await handle.done;
+        [, outcome] = await Promise.all([drain, handle.done]);
       } catch (error) {
         if (timedOut) {
           throw gitFailure('git-control/timeout', `git ${args[0]} timed out.`);
@@ -382,7 +445,10 @@ class GitControl {
         throw gitFailure('git-control/spawn-failed', `git ${args[0]} failed to run: ${error instanceof Error ? error.message : String(error)}`);
       }
 
-      const stdout = handle.collected?.stdout === undefined ? '' : handle.collected.stdout.readFrom(0).text;
+      if (overflow) {
+        throw gitFailure('git-control/too-large', `git ${args[0]} produced more than ${MAX_IMAGE_BYTES} bytes.`);
+      }
+
       const stderr = handle.collected?.stderr === undefined ? '' : handle.collected.stderr.readFrom(0).text;
       const exitCode = outcome.exitCode === null || outcome.exitCode === undefined ? -1 : outcome.exitCode;
       if (!acceptCodes.includes(exitCode)) {
@@ -392,6 +458,10 @@ class GitControl {
           { exitCode, command: ['git', ...args].join(' '), stderr: stderr.slice(0, 4000) },
         );
       }
+      if (binary) {
+        return { exitCode, bytes: Buffer.concat(chunks), stderr };
+      }
+      const stdout = handle.collected?.stdout === undefined ? '' : handle.collected.stdout.readFrom(0).text;
       return { exitCode, stdout, stderr };
     } finally {
       clearTimeout(timer);
@@ -447,13 +517,24 @@ class GitControl {
 
   /**
    * Render one path comparison for the panel.
-   * @param input - `{ path, file, staged, untracked }`.
+   * @param input - `{ path, file, staged, untracked, conflicted, originalPath }`.
    * @param signal - caller cancellation.
-   * @returns diff text or an untracked file preview.
+   * @returns an image comparison, diff text, or an untracked file preview.
    */
   async diff(input, signal) {
     const root = await this.root(input?.path, signal);
     const file = requireRelativePaths([input?.file])[0];
+
+    const originalPath = typeof input?.originalPath === 'string' && input.originalPath !== ''
+      ? requireRelativePaths([input.originalPath])[0]
+      : null;
+    const image = await this.imageInfo(root, file, {
+      staged: input?.staged === true,
+      untracked: input?.untracked === true,
+      conflicted: input?.conflicted === true,
+      originalPath,
+    }, signal);
+    if (image !== null) return image;
 
     if (input?.untracked === true) {
       return this.readUntracked(root, file);
@@ -474,6 +555,155 @@ class GitControl {
       text: result.stdout.slice(0, MAX_DIFF_CHARS),
       truncated: result.stdout.length > MAX_DIFF_CHARS,
     };
+  }
+
+  /**
+   * Describe one image comparison for the panel: the old and the new side, each
+   * with the repository path, byte size, and content token the preview URL
+   * carries.
+   * @param root - repository root.
+   * @param file - repository-relative path.
+   * @param options - `{ staged, untracked, conflicted, originalPath }`.
+   * @param signal - caller cancellation.
+   * @returns the image payload, or null when the path is not a previewable image.
+   */
+  async imageInfo(root, file, options, signal) {
+    const mime = imageMimeOf(file);
+    if (mime === null || options.conflicted === true) return null;
+
+    if (options.untracked === true) {
+      const current = await this.worktreeImage(root, file, signal);
+      if (current === null) return null;
+      return { kind: 'image', root, mime, untracked: true, staged: false, old: null, new: current };
+    }
+
+    const staged = options.staged === true;
+    const beforePath = options.originalPath ?? file;
+    const [old, current] = await Promise.all([
+      this.objectImage(root, staged ? `HEAD:${beforePath}` : `:${beforePath}`, staged ? 'head' : 'index', beforePath, signal),
+      staged
+        ? this.objectImage(root, `:${file}`, 'index', file, signal)
+        : this.worktreeImage(root, file, signal),
+    ]);
+    if (old === null && current === null) return null;
+    return { kind: 'image', root, mime, untracked: false, staged, old, new: current };
+  }
+
+  /**
+   * Facts about one blob revision, or null when that side holds no blob.
+   * @param root - repository root.
+   * @param rev - revision expression such as `HEAD:logo.png` or `:logo.png`.
+   * @param side - which side of the comparison this revision is.
+   * @param file - repository-relative path the revision names.
+   * @param signal - caller cancellation.
+   * @returns `{ side, path, size, token, previewable }`, or null.
+   */
+  async objectImage(root, rev, side, file, signal) {
+    const [resolved, sizeResult] = await Promise.all([
+      this.run(root, ['rev-parse', '--verify', '--quiet', rev], { signal, acceptCodes: [0, 1, 128] }),
+      this.run(root, ['cat-file', '-s', rev], { signal, acceptCodes: [0, 1, 128] }),
+    ]);
+    const oid = resolved.stdout.trim();
+    const size = Number(sizeResult.stdout.trim());
+    if (resolved.exitCode !== 0 || !/^[0-9a-f]{4,64}$/.test(oid)) return null;
+    if (sizeResult.exitCode !== 0 || !Number.isSafeInteger(size) || size < 0) return null;
+    return { side, path: file, size, token: oid, previewable: size <= MAX_IMAGE_BYTES };
+  }
+
+  /**
+   * Facts about the work-tree copy of one image, or null when it is absent.
+   * @param root - repository root.
+   * @param file - repository-relative path.
+   * @param signal - caller cancellation.
+   * @returns `{ side, path, size, token, previewable }`, or null.
+   */
+  async worktreeImage(root, file, signal) {
+    try {
+      const target = await this.ctx.fs.resolve(file, { cwd: root, signal });
+      const info = await this.ctx.fs.stat(target, signal);
+      if (info === undefined || info.type !== 'file') return null;
+      const size = info.size ?? 0;
+      return { side: 'worktree', path: file, size, token: String(info.version), previewable: size <= MAX_IMAGE_BYTES };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Serve one image side as raw bytes for the panel's preview.
+   * @param url - request URL carrying `path`, `file`, `side`, and a cache token.
+   * @param signal - request cancellation.
+   * @returns the image response, or a plain failure.
+   */
+  async serveImage(url, signal) {
+    const directory = url.searchParams.get('path') ?? '';
+    const file = url.searchParams.get('file') ?? '';
+    const side = url.searchParams.get('side') ?? '';
+
+    let mime;
+    let bytes;
+    try {
+      const root = await this.root(directory, signal);
+      const relative = requireRelativePaths([file])[0];
+      mime = imageMimeOf(relative);
+      if (mime === null) return imageFailure(415, 'That path is not a previewable image.');
+      if (side === 'worktree') {
+        bytes = await this.worktreeBytes(root, relative, signal);
+      } else if (side === 'index') {
+        bytes = await this.objectBytes(root, `:${relative}`, signal);
+      } else if (side === 'head') {
+        bytes = await this.objectBytes(root, `HEAD:${relative}`, signal);
+      } else {
+        return imageFailure(400, 'Unknown image side.');
+      }
+      if (bytes === null) return imageFailure(404, 'The image is not present on that side.');
+    } catch (error) {
+      const tooLarge = error?.code === 'git-control/too-large' || error?.code === 'FS_TOO_LARGE';
+      return imageFailure(tooLarge ? 413 : 404, error instanceof Error ? error.message : 'The image could not be read.');
+    }
+
+    return new Response(bytes, {
+      status: 200,
+      headers: {
+        'content-type': mime,
+        'content-length': String(bytes.byteLength),
+        'cache-control': 'private, max-age=60, immutable',
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'; sandbox",
+      },
+    });
+  }
+
+  /**
+   * Read the work-tree bytes of one image.
+   * @param root - repository root.
+   * @param file - repository-relative path.
+   * @param signal - caller cancellation.
+   * @returns the bytes, or null when the path is absent or not a regular file.
+   */
+  async worktreeBytes(root, file, signal) {
+    const rootTarget = await this.ctx.fs.resolve(root, { signal });
+    const target = await this.ctx.fs.resolve(file, { cwd: root, signal });
+    if (!this.ctx.fs.contains(rootTarget, target)) return null;
+    const info = await this.ctx.fs.stat(target, signal);
+    if (info === undefined || info.type !== 'file') return null;
+    if ((info.size ?? 0) > MAX_IMAGE_BYTES) {
+      throw gitFailure('git-control/too-large', `The image is larger than ${MAX_IMAGE_BYTES} bytes.`);
+    }
+    return this.ctx.fs.readBytes(target, signal, MAX_IMAGE_BYTES);
+  }
+
+  /**
+   * Read one blob from the object store as raw bytes.
+   * @param root - repository root.
+   * @param rev - revision expression naming a blob.
+   * @param signal - caller cancellation.
+   * @returns the bytes, or null when the revision holds no blob.
+   */
+  async objectBytes(root, rev, signal) {
+    const result = await this.run(root, ['cat-file', 'blob', rev], { signal, binary: true, acceptCodes: [0, 128] });
+    if (result.exitCode !== 0) return null;
+    return result.bytes;
   }
 
   /**
@@ -1007,7 +1237,7 @@ export const name = 'git-control';
 export const inject = ['subprocess', 'fs', 'connection'];
 
 /**
- * Mount the git service and its Client route.
+ * Mount the git service and its Client routes.
  * @param ctx - plugin context.
  */
 export function apply(ctx) {
@@ -1015,26 +1245,34 @@ export function apply(ctx) {
   ctx.provide('gitControl', service);
 
   ctx.effect(() => {
-    const dispose = ctx.connection.fetch.register({
-      path: ROUTE_PATH,
-      methods: ['POST'],
-      requestBody: 'buffered',
-      fetch: async (request) => {
-        let body;
-        try {
-          body = await request.json();
-        } catch {
-          return Response.json(
-            { ok: false, code: 'git-control/bad-request', message: 'The request body must be JSON.' },
-            { status: 400, headers: { 'cache-control': 'no-store' } },
-          );
-        }
-        const outcome = await service.dispatch(body, request.signal);
-        return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
-      },
-    });
+    const disposers = [
+      ctx.connection.fetch.register({
+        path: ROUTE_PATH,
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: async (request) => {
+          let body;
+          try {
+            body = await request.json();
+          } catch {
+            return Response.json(
+              { ok: false, code: 'git-control/bad-request', message: 'The request body must be JSON.' },
+              { status: 400, headers: { 'cache-control': 'no-store' } },
+            );
+          }
+          const outcome = await service.dispatch(body, request.signal);
+          return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+        },
+      }),
+      ctx.connection.fetch.register({
+        path: BLOB_PATH,
+        methods: ['GET', 'HEAD'],
+        requestBody: 'buffered',
+        fetch: async (request) => service.serveImage(new URL(request.url), request.signal),
+      }),
+    ];
     return () => {
-      void dispose().catch(() => {});
+      for (const dispose of disposers) void dispose().catch(() => {});
     };
-  }, 'git-control: route');
+  }, 'git-control: routes');
 }
