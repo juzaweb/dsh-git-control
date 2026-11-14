@@ -47,6 +47,14 @@ const PROMPT_DIFF_CHARS = 24_000;
 /** Ceiling for one message-generation call. */
 const MESSAGE_TIMEOUT_MS = 60_000;
 
+/**
+ * Model selection used for generated commit messages.
+ * @typedef {object} CommitModelSelection
+ * @property {string} provider - registered provider route.
+ * @property {string} model - provider-owned model id.
+ * @property {string} [reasoningEffort] - adapter-owned reasoning effort.
+ */
+
 /** Authenticated Client route backing the panel. */
 const ROUTE_PATH = '/api/git-control';
 /** Authenticated route serving one image side as raw bytes. */
@@ -334,6 +342,30 @@ function cleanCommitMessage(value) {
 }
 
 /**
+ * Read the configured commit-message model.
+ * @param raw - the plugin's `commitModel` config value, if any.
+ * @returns the validated selection, or null when the plugin config leaves it unset.
+ * @throws a `git-control/bad-config` failure when the value is present but malformed.
+ */
+function configuredCommitModel(raw) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw gitFailure('git-control/bad-config', 'commitModel must be an object with provider and model.');
+  }
+  const provider = typeof raw.provider === 'string' ? raw.provider.trim() : '';
+  const model = typeof raw.model === 'string' ? raw.model.trim() : '';
+  if (provider === '' || model === '') {
+    throw gitFailure('git-control/bad-config', 'commitModel.provider and commitModel.model must both be non-empty strings.');
+  }
+  const effort = raw.reasoningEffort;
+  if (effort !== undefined && effort !== null && typeof effort !== 'string') {
+    throw gitFailure('git-control/bad-config', 'commitModel.reasoningEffort must be a string when set.');
+  }
+  const reasoningEffort = typeof effort === 'string' && effort.trim() !== '' ? effort.trim() : undefined;
+  return reasoningEffort === undefined ? { provider, model } : { provider, model, reasoningEffort };
+}
+
+/**
  * Take the first non-empty line of git output.
  * @param text - git output.
  * @returns the line, or an empty string.
@@ -358,10 +390,12 @@ class GitControl {
   /**
    * @param ctx - plugin context carrying `subprocess` and `fs`.
    * @param logger - plugin logger for unexpected failures.
+   * @param commitModel - raw `commitModel` plugin config, validated on use.
    */
-  constructor(ctx, logger) {
+  constructor(ctx, logger, commitModel = null) {
     this.ctx = ctx;
     this.logger = logger;
+    this.commitModel = commitModel;
   }
 
   /**
@@ -1086,7 +1120,7 @@ class GitControl {
   }
 
   /**
-   * Ask the default model for one commit message.
+   * Ask the configured model for one commit message.
    * @param selection - provider, model, and optional reasoning effort.
    * @param context - the material gathered by `commitContext`.
    * @param signal - caller cancellation.
@@ -1184,9 +1218,13 @@ class GitControl {
     if (status.files.length === 0) {
       throw gitFailure('git-control/clean', 'There is nothing to describe: the work tree is clean.');
     }
-    const selection = this.ctx.get('agentDefaultModel')?.currentSelection();
+    const configured = configuredCommitModel(this.commitModel);
+    const selection = configured ?? this.ctx.get('agentDefaultModel')?.currentSelection();
     if (selection === undefined || selection === null) {
-      throw gitFailure('git-control/no-model', 'No default model is configured for message generation.');
+      throw gitFailure(
+        'git-control/no-model',
+        'No commit message model is configured: set the plugin\'s commitModel or a default agent model.',
+      );
     }
     const context = await this.commitContext(root, status, signal);
     return this.completeCommitMessage(selection, context, signal);
@@ -1239,9 +1277,11 @@ export const inject = ['subprocess', 'fs', 'connection'];
 /**
  * Mount the git service and its Client routes.
  * @param ctx - plugin context.
+ * @param config - plugin options; `commitModel` overrides the model used for
+ * message generation, and its absence falls back to the default agent model.
  */
-export function apply(ctx) {
-  const service = new GitControl(ctx, ctx.logger);
+export function apply(ctx, config = {}) {
+  const service = new GitControl(ctx, ctx.logger, config?.commitModel ?? null);
   ctx.provide('gitControl', service);
 
   ctx.effect(() => {

@@ -56,9 +56,9 @@ The commit card is shaped by the repository state:
 It carries two icon controls:
 
 - **Stage all** — one `git add --all`, so new files and deletions are included.
-- **Generate message** — asks the default agent model to write the message from
-  the staged diff (the working tree when nothing is staged), fills the composer,
-  and never commits on its own.
+- **Generate message** — asks the configured commit model to write the message
+  from the staged diff (the working tree when nothing is staged), fills the
+  composer, and never commits on its own.
 
 The branch bar shows fetch, pull (`--ff-only`), and push as icons carrying their
 own counts, each enabled only where it can succeed:
@@ -104,8 +104,30 @@ command it will run. The dialog closes on Escape or a click outside it.
 - **Bounded generation.** The prompt carries at most 24 000 characters of diff,
   the call is capped at 320 output tokens and 60 s, and the reply is reduced to
   a plain message. Message generation is the only path that leaves the machine,
-  it never writes to the repository, and a profile without a default model
+  it never writes to the repository, and a profile without a usable model
   reports an error instead of guessing.
+
+## Configuration
+
+Message generation reads one optional plugin option, `commitModel`. When it is
+absent the plugin falls back to the default agent model, so an existing profile
+needs no change. Set it in the profile patch (`cordis.patch.yml`) to generate
+commit messages with a different model than the agent:
+
+```yaml
+- id: git-control
+  name: "@local/dsh-git-control"
+  config:
+    commitModel:
+      provider: router
+      model: qd/dfmodel
+      # reasoningEffort: low   # optional; the provider default applies when omitted
+```
+
+A profile patch replaces the whole matched config, so restate every option the
+entry keeps. `provider` and `model` must both be non-empty strings; a malformed
+`commitModel` fails the Generate action with `git-control/bad-config` instead of
+silently using another model.
 
 ## Layout
 
