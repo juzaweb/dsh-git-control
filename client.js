@@ -702,6 +702,7 @@ window.__ModuleLoader__.load({
       const [collapsedGroups, setCollapsedGroups] = React.useState(cached.collapsedGroups);
       const [prInfo, setPrInfo] = React.useState(null);
       const [prTitle, setPrTitle] = React.useState('');
+      const prTitleEditedRef = React.useRef(false);
       const [prBody, setPrBody] = React.useState('');
       const [prBase, setPrBase] = React.useState('');
       const [prBusy, setPrBusy] = React.useState(false);
@@ -851,6 +852,7 @@ window.__ModuleLoader__.load({
 
       /* Switching branches starts a new pull request: clear the composer. */
       React.useEffect(() => {
+        prTitleEditedRef.current = false;
         setPrTitle('');
         setPrBody('');
         setPrBase('');
@@ -889,6 +891,13 @@ window.__ModuleLoader__.load({
       const mergedPr = prData?.merged ?? null;
       const worktree = prData?.worktree ?? null;
       const mergedOpen = mergedPr !== null;
+
+      /* Seed the title from what the branch carries until the author types. */
+      React.useEffect(() => {
+        if (prTitleEditedRef.current) return;
+        const suggestion = prData?.suggestedTitle;
+        if (typeof suggestion === 'string' && suggestion !== '') setPrTitle(suggestion);
+      }, [prData]);
 
       /*
        * A merge happens elsewhere, so the panel rereads the pull request state
@@ -1278,6 +1287,7 @@ window.__ModuleLoader__.load({
                         placeholder: t('pr.titlePlaceholder'),
                         'aria-label': t('pr.titlePlaceholder'),
                         onChange: (event) => {
+                          prTitleEditedRef.current = true;
                           setPrTitle(event.target.value);
                           if (error !== null) setError(null);
                         },

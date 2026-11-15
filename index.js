@@ -281,6 +281,18 @@ function findUrl(text) {
 }
 
 /**
+ * Turn a branch name into a readable pull request title.
+ * @param branch - the head branch name.
+ * @returns the cleaned title, or the branch name when nothing readable remains.
+ */
+function branchTitle(branch) {
+  const stripped = branch.replace(/^(?:feature|feat|bugfix|fix|hotfix|chore|release|refactor|docs|test)\//iu, '');
+  const words = stripped.replace(/[-_/]+/gu, ' ').replace(/\s+/gu, ' ').trim();
+  if (words === '') return branch;
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
  * Media type for a repository path the panel previews as an image.
  * @param file - repository-relative path.
  * @returns the media type, or null when the extension is not a known image.
@@ -1215,19 +1227,57 @@ class GitControl {
   }
 
   /**
+   * Suggest a pull request title: the newest subject the branch carries over
+   * the base branch, else a readable form of the branch name.
+   * @param root - repository root.
+   * @param base - base branch the request targets, or null when none is known.
+   * @param branch - the head branch.
+   * @param signal - caller cancellation.
+   * @returns the suggested title, at most `PR_TITLE_MAX_CHARS` characters.
+   */
+  async suggestedTitle(root, base, branch, signal) {
+    let subject = '';
+    if (base !== null && base !== branch) {
+      for (const ref of [`refs/heads/${base}`, `refs/remotes/origin/${base}`]) {
+        const exists = await this.run(root, ['rev-parse', '--verify', '--quiet', ref], { signal, acceptCodes: [0, 1, 128] });
+        if (exists.exitCode !== 0) continue;
+        const log = await this.run(root, ['log', '--no-color', '--no-merges', '--max-count=1', '--format=%s', `${ref}..HEAD`], {
+          signal,
+          acceptCodes: [0, 128],
+        });
+        if (log.exitCode === 0) subject = firstLine(log.stdout);
+        break;
+      }
+    }
+    const title = subject === '' ? branchTitle(branch) : subject;
+    return title.slice(0, PR_TITLE_MAX_CHARS).trim();
+  }
+
+  /**
    * Report whether the current branch can open a pull request, and against which
    * base branches it may do so.
    * @param input - `{ path }`.
    * @param signal - caller cancellation.
    * @returns branch, GitHub CLI state, base candidates, any open request, whether
-   * the branch's pull request already merged, and the worktree it runs in.
+   * the branch's pull request already merged, a title suggestion, and the
+   * worktree it runs in.
    */
   async pullRequestInfo(input, signal) {
     const root = await this.root(input?.path, signal);
     const status = await this.status({ path: root }, signal);
     const worktree = await this.worktreeState(root, signal);
     if (status.detached || status.branch === null) {
-      return { branch: null, gh: false, authenticated: false, base: null, bases: [], existing: null, merged: null, worktree };
+      return {
+        branch: null,
+        gh: false,
+        authenticated: false,
+        base: null,
+        bases: [],
+        existing: null,
+        merged: null,
+        suggestedTitle: null,
+        worktree,
+      };
     }
     const [gh, branches] = await Promise.all([
       this.ghState(root, signal),
@@ -1242,6 +1292,7 @@ class GitControl {
     const merged = state !== null && state.state === 'MERGED'
       ? { url: state.url, number: state.number, base: state.baseRefName, mergedAt: state.mergedAt }
       : null;
+    const suggestedTitle = await this.suggestedTitle(root, branches.base, status.branch, signal);
     return {
       branch: status.branch,
       gh: gh.installed,
@@ -1250,6 +1301,7 @@ class GitControl {
       bases: branches.bases,
       existing,
       merged,
+      suggestedTitle,
       worktree,
     };
   }

@@ -57,6 +57,9 @@ The commit card is shaped by the repository state:
 Once the branch is clean, fully pushed, and is not `main`, `master`, or
 `develop`, the commit card adds a **pull request** composer: a title, an optional
 description, and a base-branch picker seeded with the remote's default branch.
+The title is filled in on its own: the newest commit subject the branch carries
+over the base, or a readable form of the branch name when it has none. It stays
+editable, and typing in it stops the panel from writing over it.
 **Create pull request** runs `gh pr create --base <base> --head <branch>` through
 the Host. An open pull request for the same branch is shown as a link instead of
 a second form, and the panel never opens one on its own.
