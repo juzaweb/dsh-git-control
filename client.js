@@ -187,6 +187,7 @@ window.__ModuleLoader__.load({
       'commit.leftOut': '{count} change(s) stay out of this commit.',
       'commit.ready': 'Ready: {count} file(s) go into the next commit.',
       'commit.readyToPush': '{count} commit(s) are waiting for the remote.',
+      'commit.readyToPublish': '{branch} is not on the remote yet: publish it to back up this commit.',
       'commit.readyToPull': 'The remote has {count} commit(s) to bring in.',
       'commit.pushAction': 'Push {count} commit(s)',
       'commit.pullAction': 'Pull {count} commit(s)',
@@ -1130,7 +1131,7 @@ window.__ModuleLoader__.load({
       const behind = status === null || status.detached ? 0 : status.behind ?? 0;
       const unpublished = status !== null && (status.upstream === null || status.upstreamGone);
       const canPull = status !== null && !detached && !unpublished && behind > 0;
-      const canPush = status !== null && !detached && (unpublished || ahead > 0) && behind === 0;
+      const canPush = status !== null && !detached && status.noCommits !== true && (unpublished || ahead > 0) && behind === 0;
 
       /**
        * Why the commit button cannot run, or null when it can.
@@ -1167,7 +1168,7 @@ window.__ModuleLoader__.load({
        */
       const cardAction = stagedCount > 0 || hasConflicts
         ? null
-        : ahead > 0 && canPush
+        : canPush
           ? {
               id: 'push',
               label: unpublished ? t('sync.publish') : t('commit.pushAction', { count: ahead }),
@@ -1192,7 +1193,8 @@ window.__ModuleLoader__.load({
                 : looseCount > 0 ? t('commit.leftOut', { count: looseCount })
                   : detached ? t('commit.blocked.detached')
                     : t('commit.ready', { count: stagedCount }))
-              : cardAction?.id === 'push' ? t('commit.readyToPush', { count: ahead })
+              : cardAction?.id === 'push'
+                ? (unpublished ? t('commit.readyToPublish', { branch: status.branch }) : t('commit.readyToPush', { count: ahead }))
                 : cardAction?.id === 'pull' ? t('commit.readyToPull', { count: behind })
                   : clean ? t('commit.blocked.empty')
                     : t('commit.blocked.unstaged')
