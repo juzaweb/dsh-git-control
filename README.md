@@ -53,6 +53,16 @@ The commit card is shaped by the repository state:
 | Changes, none staged | marks *N unstaged* / *N untracked*, keeps the composer open |
 | Staged paths | button reads `Commit N file(s)` and enables once a message exists |
 
+Once the branch is clean, fully pushed, and is not `main`, `master`, or
+`develop`, the commit card adds a **pull request** composer: a title, an optional
+description, and a base-branch picker seeded with the remote's default branch.
+**Create pull request** runs `gh pr create --base <base> --head <branch>` through
+the Host. An open pull request for the same branch is shown as a link instead of
+a second form, and the panel never opens one on its own.
+
+The composer needs the GitHub CLI on the Host. A missing `gh` is named in the
+card, and an installed but signed-out CLI asks for `gh auth login`.
+
 It carries two icon controls:
 
 - **Stage all** — one `git add --all`, so new files and deletions are included.
@@ -81,7 +91,11 @@ command it will run. The dialog closes on Escape or a click outside it.
 ## Safety
 
 - **Argv only.** Commands are spawned as argument arrays through
-  `ctx.subprocess`; no shell, no string interpolation.
+  `ctx.subprocess`; no shell, no string interpolation. Pull requests go through
+  the GitHub CLI the same way, with `GH_PROMPT_DISABLED=1` so it can never wait
+  on a prompt: the panel only opens one from a clean, fully pushed branch whose
+  name is not `main`, `master`, or `develop`, and the title, body, and base
+  branch are validated before `gh` sees them.
 - **Owner only.** The two Host routes — `POST /api/git-control` for operations
   and `GET /api/git-control/blob` for image bytes — sit behind the Connection
   fence, so only the authenticated browser session reaches them.

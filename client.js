@@ -27,6 +27,8 @@ window.__ModuleLoader__.load({
     const LOG_STEP = 40;
     /** Polling interval when the panel is open and visible. */
     const POLL_INTERVAL_MS = 3000;
+    /** Branches a pull request is opened against, never from. */
+    const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
 
     const DICTIONARY = {
       'type.label': 'Git',
@@ -141,6 +143,20 @@ window.__ModuleLoader__.load({
       'commit.readyToPull': 'The remote has {count} commit(s) to bring in.',
       'commit.pushAction': 'Push {count} commit(s)',
       'commit.pullAction': 'Pull {count} commit(s)',
+      'pr.title': 'Open a pull request',
+      'pr.subtitle': '{branch} → {base}',
+      'pr.subtitleUnknown': '{branch} → a base branch',
+      'pr.loading': 'Reading the pull request state…',
+      'pr.baseLabel': 'Base',
+      'pr.titlePlaceholder': 'Pull request title',
+      'pr.bodyPlaceholder': 'Description (optional)',
+      'pr.action': 'Create pull request',
+      'pr.actionHint': 'Run gh pr create for {branch}',
+      'pr.open': 'Open pull request',
+      'pr.existing': 'A pull request is already open for this branch.',
+      'pr.opened': 'Pull request created.',
+      'pr.noGh': 'The GitHub CLI (gh) is not installed: install it to open pull requests here.',
+      'pr.notAuthenticated': 'The GitHub CLI is not signed in: run `gh auth login` first.',
       'notice.failed': 'The git command failed.',
       'view.noDirectory': 'This session has no working directory to inspect.',
     };
@@ -474,6 +490,14 @@ window.__ModuleLoader__.load({
       fetch: [['path', { d: 'M13 8a5 5 0 1 1-1.6-3.7' }], ['path', { d: 'M13.2 2.9v2.8h-2.8' }]],
       pull: [['path', { d: 'M8 2.6v6.4' }], ['path', { d: 'M5.2 6.2 8 9l2.8-2.8' }], ['path', { d: 'M2.8 12.4h10.4' }]],
       push: [['path', { d: 'M8 9.4V3' }], ['path', { d: 'M5.2 5.8 8 3l2.8 2.8' }], ['path', { d: 'M2.8 12.4h10.4' }]],
+      pullRequest: [
+        ['circle', { cx: 4, cy: 3.2, r: 1.6 }],
+        ['circle', { cx: 4, cy: 12.8, r: 1.6 }],
+        ['circle', { cx: 12, cy: 12.8, r: 1.6 }],
+        ['path', { d: 'M4 4.8v6.4' }],
+        ['path', { d: 'M12 11.2V7.4a2 2 0 0 0-2-2H7.2' }],
+        ['path', { d: 'M8.6 3.8 7 5.4l1.6 1.6' }],
+      ],
       check: [['path', { d: 'M3.5 8.5 6.5 11.5 12.5 5.5' }]],
       apply: [['path', { d: 'M8 2.6v6' }], ['path', { d: 'M5.2 6 8 8.8 10.8 6' }], ['path', { d: 'M3.4 9.4v3.6h9.2V9.4' }]],
       pop: [['path', { d: 'M8 8.6V2.6' }], ['path', { d: 'M5.2 5.2 8 2.4l2.8 2.8' }], ['path', { d: 'M3.4 9.4v3.6h9.2V9.4' }]],
@@ -616,6 +640,13 @@ window.__ModuleLoader__.load({
       const [confirm, setConfirm] = React.useState(null);
       const [generating, setGenerating] = React.useState(false);
       const [collapsedGroups, setCollapsedGroups] = React.useState({});
+      const [prInfo, setPrInfo] = React.useState(null);
+      const [prTitle, setPrTitle] = React.useState('');
+      const [prBody, setPrBody] = React.useState('');
+      const [prBase, setPrBase] = React.useState('');
+      const [prBusy, setPrBusy] = React.useState(false);
+      const [prResult, setPrResult] = React.useState(null);
+      const [prReload, setPrReload] = React.useState(0);
 
       const toggleGroup = (key) => setCollapsedGroups((current) => ({ ...current, [key]: !current[key] }));
 
@@ -702,6 +733,49 @@ window.__ModuleLoader__.load({
           document.removeEventListener('visibilitychange', onVisibilityChange);
         };
       }, [chosenPath]);
+
+      /**
+       * A pull request is offered once the branch is clean, pushed, and is not
+       * one of the branches a pull request targets.
+       */
+      const prBranch = status === null || status.detached ? null : status.branch;
+      const prEligible = status !== null
+        && prBranch !== null
+        && status.files.length === 0
+        && status.ahead === 0
+        && status.behind === 0
+        && status.upstream !== null
+        && status.upstreamGone !== true
+        && !PROTECTED_BRANCHES.has(prBranch);
+
+      /* Switching branches starts a new pull request: clear the composer. */
+      React.useEffect(() => {
+        setPrTitle('');
+        setPrBody('');
+        setPrBase('');
+        setPrResult(null);
+      }, [prBranch, chosenPath]);
+
+      /* Read the pull request state once, and again after a create attempt. */
+      React.useEffect(() => {
+        if (!prEligible || chosenPath === null) {
+          setPrInfo(null);
+          return undefined;
+        }
+        const controller = new AbortController();
+        setPrInfo({ phase: 'loading', data: null, failure: null });
+        callApi({ action: 'pullRequestInfo', path: chosenPath }, controller.signal)
+          .then((data) => {
+            if (controller.signal.aborted) return;
+            setPrInfo({ phase: 'ready', data, failure: null });
+            setPrBase((current) => (current === '' && typeof data?.base === 'string' ? data.base : current));
+          })
+          .catch((err) => {
+            if (controller.signal.aborted) return;
+            setPrInfo({ phase: 'error', data: null, failure: failureOf(err) });
+          });
+        return () => controller.abort();
+      }, [prEligible, prBranch, chosenPath, prReload]);
 
       /* Keep the selected diff target in sync with updated file status. */
       React.useEffect(() => {
@@ -854,6 +928,27 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /** Open a pull request for the current branch with the GitHub CLI. */
+      const createPullRequest = async () => {
+        setPrBusy(true);
+        setError(null);
+        try {
+          const data = await callApi({
+            action: 'createPullRequest',
+            path: chosenPath,
+            title: prTitle.trim(),
+            body: prBody.trim(),
+            base: prBase,
+          });
+          setPrResult({ url: typeof data?.url === 'string' ? data.url : null });
+          setPrReload((current) => current + 1);
+        } catch (err) {
+          setError(failureOf(err));
+        } finally {
+          setPrBusy(false);
+        }
+      };
+
       const files = status === null ? [] : status.files;
       const stagedFiles = files.filter((file) => file.staged);
       const changedFiles = files.filter((file) => file.unstaged && !file.untracked && !file.conflicted);
@@ -989,6 +1084,116 @@ window.__ModuleLoader__.load({
                 }
               : null;
 
+
+      /**
+       * Render the pull request composer that follows a clean, pushed branch.
+       * @returns the composer element, or null when the branch is not eligible.
+       */
+      const renderPullRequest = () => {
+        if (!prEligible) return null;
+        const info = prInfo !== null && prInfo.phase === 'ready' ? prInfo.data : null;
+        const existingUrl = typeof prResult?.url === 'string'
+          ? prResult.url
+          : (typeof info?.existing?.url === 'string' ? info.existing.url : null);
+        const base = prBase !== ''
+          ? prBase
+          : (typeof info?.base === 'string' ? info.base : '');
+        const bases = Array.isArray(info?.bases) ? info.bases : [];
+        const canSubmit = !prBusy && prTitle.trim() !== '' && base !== '';
+
+        const body = existingUrl !== null
+          ? h('p', { className: 'gctl-hint' }, prResult === null ? t('pr.existing') : t('pr.opened'))
+          : prInfo === null || prInfo.phase === 'loading'
+            ? h('p', { className: 'gctl-hint' }, t('pr.loading'))
+            : prInfo.phase === 'error'
+              ? h('p', { className: 'gctl-hint gctl-hintBad' }, prInfo.failure.message)
+              : info?.gh !== true
+                ? h('p', { className: 'gctl-hint gctl-hintBad' }, t('pr.noGh'))
+                : info?.authenticated !== true
+                  ? h('p', { className: 'gctl-hint gctl-hintBad' }, t('pr.notAuthenticated'))
+                  : h(
+                      'div',
+                      { className: 'gctl-prForm' },
+                      h('input', {
+                        type: 'text',
+                        className: 'gctl-input',
+                        value: prTitle,
+                        maxLength: 200,
+                        placeholder: t('pr.titlePlaceholder'),
+                        'aria-label': t('pr.titlePlaceholder'),
+                        onChange: (event) => {
+                          setPrTitle(event.target.value);
+                          if (error !== null) setError(null);
+                        },
+                      }),
+                      h('textarea', {
+                        className: 'gctl-textarea',
+                        rows: 3,
+                        value: prBody,
+                        placeholder: t('pr.bodyPlaceholder'),
+                        'aria-label': t('pr.bodyPlaceholder'),
+                        onChange: (event) => setPrBody(event.target.value),
+                      }),
+                      h(
+                        'div',
+                        { className: 'gctl-prRow' },
+                        h(
+                          'label',
+                          { className: 'gctl-prBase' },
+                          h('span', null, t('pr.baseLabel')),
+                          h(
+                            'select',
+                            {
+                              className: 'gctl-select',
+                              value: base,
+                              'aria-label': t('pr.baseLabel'),
+                              disabled: prBusy,
+                              onChange: (event) => setPrBase(event.target.value),
+                            },
+                            bases.map((name) => h('option', { key: name, value: name }, name)),
+                          ),
+                        ),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: `gctl-mainActionButton${canSubmit ? ' gctl-primary' : ''}`,
+                            title: t('pr.actionHint', { branch: prBranch }),
+                            disabled: !canSubmit,
+                            onClick: () => void createPullRequest(),
+                          },
+                          h(Glyph, { name: 'pullRequest', size: 14 }),
+                          h('span', null, prBusy ? t('working') : t('pr.action')),
+                        ),
+                      ),
+                    );
+
+        return h(
+          'div',
+          { className: 'gctl-pr' },
+          h(
+            'div',
+            { className: 'gctl-prHead' },
+            h('span', { className: 'gctl-prTitle' }, h(Glyph, { name: 'pullRequest', size: 14 }), t('pr.title')),
+            existingUrl === null
+              ? null
+              : h('a', {
+                  className: 'gctl-prLink',
+                  href: existingUrl,
+                  target: '_blank',
+                  rel: 'noreferrer noopener',
+                }, t('pr.open')),
+          ),
+          h(
+            'p',
+            { className: 'gctl-prSubtitle' },
+            base === ''
+              ? t('pr.subtitleUnknown', { branch: prBranch })
+              : t('pr.subtitle', { branch: prBranch, base }),
+          ),
+          body,
+        );
+      };
 
       /**
        * Render error details below an input or group.
@@ -1410,6 +1615,7 @@ window.__ModuleLoader__.load({
                                   commitHint,
                                 ),
                               ),
+                          renderPullRequest(),
                         ),
                         renderGroup({
                           key: 'conflicts',
@@ -1854,6 +2060,18 @@ window.__ModuleLoader__.load({
 .gctl-mainActionButton.gctl-primary{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
 .gctl-commitHintRow{margin-top:8px;display:flex;align-items:center;justify-content:center;text-align:center}
 .gctl-commitHintRow .gctl-hint{margin:0;font-size:12px}
+.gctl-pr{margin-top:12px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:8px}
+.gctl-prHead{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.gctl-prTitle{color:var(--dsw-alias-label-primary);align-items:center;gap:6px;font-size:13px;font-weight:500;display:inline-flex}
+.gctl-prSubtitle{color:var(--dsw-alias-label-secondary);margin:0;font-size:12px;overflow-wrap:anywhere}
+.gctl-pr .gctl-hint{margin:0;font-size:12px}
+.gctl-prForm{display:flex;flex-direction:column;gap:8px}
+.gctl-prRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.gctl-prBase{color:var(--dsw-alias-label-secondary);align-items:center;gap:6px;font-size:12px;display:inline-flex;flex:1;min-width:140px}
+.gctl-prBase .gctl-select{flex:1;min-width:110px;max-width:none;height:28px;font-size:12px}
+.gctl-prRow .gctl-mainActionButton{width:auto;flex:none;height:28px;font-size:12px}
+.gctl-prLink{color:var(--dsw-alias-brand-primary);font-size:12px;text-decoration:none;white-space:nowrap}
+.gctl-prLink:hover{text-decoration:underline}
 .gctl-group{margin-bottom:18px}
 .gctl-groupHead{display:flex;align-items:center;justify-content:space-between;padding:4px 6px;margin:8px 0 4px;border-radius:6px;cursor:pointer;user-select:none}
 .gctl-groupHead:hover{background:var(--dsw-alias-bg-layer-1)}
@@ -1936,6 +2154,9 @@ window.__ModuleLoader__.load({
 .gctl-compact .gctl-iconButton{min-width:24px;height:22px;padding:0 3px}
 .gctl-compact .gctl-rowActions{gap:0}
 .gctl-compact .gctl-mainActionButton{height:28px;font-size:12px;padding:0 8px}
+.gctl-compact .gctl-pr{gap:6px}
+.gctl-compact .gctl-prSubtitle,.gctl-compact .gctl-pr .gctl-hint{font-size:11px}
+.gctl-compact .gctl-prRow{gap:6px}
 .gctl-compact .gctl-imagePair{gap:6px;padding:8px}
 .gctl-compact .gctl-imageFrame{min-height:110px;padding:6px}
 .gctl-compact .gctl-image{max-height:220px}

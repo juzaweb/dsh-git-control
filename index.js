@@ -47,6 +47,21 @@ const PROMPT_DIFF_CHARS = 24_000;
 /** Ceiling for one message-generation call. */
 const MESSAGE_TIMEOUT_MS = 60_000;
 
+/** Branches that a pull request is opened *against*, never from. */
+const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
+/** Base branches offered first, after the remote's own default branch. */
+const BASE_BRANCH_ORDER = ['main', 'master', 'develop'];
+/** Ceilings for the pull request composer. */
+const PR_TITLE_MAX_CHARS = 200;
+const PR_BODY_MAX_CHARS = 20_000;
+const MAX_PR_BASES = 50;
+/** Environment that keeps the GitHub CLI non-interactive and plain. */
+const GH_ENV = {
+  GH_PROMPT_DISABLED: '1',
+  GH_NO_UPDATE_NOTIFIER: '1',
+  NO_COLOR: '1',
+};
+
 /**
  * Model selection used for generated commit messages.
  * @typedef {object} CommitModelSelection
@@ -98,6 +113,8 @@ const ACTIONS = new Set([
   'reset',
   'stageAll',
   'generateCommitMessage',
+  'pullRequestInfo',
+  'createPullRequest',
 ]);
 
 /** Actions that change the work tree, index, refs, or the remote. */
@@ -216,6 +233,48 @@ function requireStashRef(value) {
     throw gitFailure('git-control/bad-request', 'That stash reference is not accepted.');
   }
   return value;
+}
+
+/**
+ * Validate the title of a pull request.
+ * @param value - candidate title.
+ * @returns the trimmed title.
+ */
+function requirePullRequestTitle(value) {
+  const title = typeof value === 'string' ? value.trim() : '';
+  if (title === '' || title.length > PR_TITLE_MAX_CHARS) {
+    throw gitFailure('git-control/bad-request', `A pull request title of 1 to ${PR_TITLE_MAX_CHARS} characters is required.`);
+  }
+  if (/[\0\r\n]/.test(title)) {
+    throw gitFailure('git-control/bad-request', 'The pull request title must be a single line.');
+  }
+  return title;
+}
+
+/**
+ * Validate the optional body of a pull request.
+ * @param value - candidate body.
+ * @returns the trimmed body, or an empty string.
+ */
+function requirePullRequestBody(value) {
+  const body = typeof value === 'string' ? value.trim() : '';
+  if (body.length > PR_BODY_MAX_CHARS) {
+    throw gitFailure('git-control/bad-request', `A pull request body holds at most ${PR_BODY_MAX_CHARS} characters.`);
+  }
+  if (body.includes('\0')) {
+    throw gitFailure('git-control/bad-request', 'The pull request body contains a control character.');
+  }
+  return body;
+}
+
+/**
+ * Find the first HTTP(S) URL in one line of tool output.
+ * @param text - tool output.
+ * @returns the URL, or null.
+ */
+function findUrl(text) {
+  const match = /https?:\/\/[^\s]+/.exec(typeof text === 'string' ? text : '');
+  return match === null ? null : match[0];
 }
 
 /**
@@ -407,7 +466,20 @@ class GitControl {
    * @returns exit code plus collected stdout (text) or bytes, and stderr.
    */
   async run(cwd, args, options = {}) {
-    const { signal, timeoutMs = LOCAL_TIMEOUT_MS, acceptCodes = [0], binary = false } = options;
+    return this.runTool(cwd, ['git', ...args], options);
+  }
+
+  /**
+   * Run one external tool (git, or the GitHub CLI) and collect its output.
+   * @param cwd - directory the tool runs in.
+   * @param argv - complete argument array, never shell-interpreted.
+   * @param options - signal, timeout, accepted exit codes, extra environment,
+   * and whether stdout is raw bytes (`binary: true`) instead of decoded text.
+   * @returns exit code plus collected stdout (text) or bytes, and stderr.
+   */
+  async runTool(cwd, argv, options = {}) {
+    const { signal, timeoutMs = LOCAL_TIMEOUT_MS, acceptCodes = [0], binary = false, env = {} } = options;
+    const commandText = argv.join(' ');
     if (signal?.aborted) {
       throw gitFailure('git-control/cancelled', 'The request was cancelled.');
     }
@@ -425,7 +497,7 @@ class GitControl {
       let handle;
       try {
         handle = this.ctx.subprocess.spawn({
-          argv: ['git', ...args],
+          argv,
           cwd,
           stdio: {
             stdin: 'ignore',
@@ -439,14 +511,15 @@ class GitControl {
             GIT_TERMINAL_PROMPT: '0',
             GIT_PAGER: 'cat',
             GIT_OPTIONAL_LOCKS: '0',
+            ...env,
           },
         });
       } catch (error) {
-        throw gitFailure('git-control/spawn-failed', `git could not start: ${error instanceof Error ? error.message : String(error)}`);
+        throw gitFailure('git-control/spawn-failed', `${argv[0]} could not start: ${error instanceof Error ? error.message : String(error)}`);
       }
 
       /* A piped stdout must be drained while the process runs, or the pipe
-         buffer fills and git blocks forever. */
+         buffer fills and the tool blocks forever. */
       const chunks = [];
       let totalBytes = 0;
       let overflow = false;
@@ -471,16 +544,16 @@ class GitControl {
         [, outcome] = await Promise.all([drain, handle.done]);
       } catch (error) {
         if (timedOut) {
-          throw gitFailure('git-control/timeout', `git ${args[0]} timed out.`);
+          throw gitFailure('git-control/timeout', `${commandText} timed out.`);
         }
         if (signal?.aborted) {
           throw gitFailure('git-control/cancelled', 'The request was cancelled.');
         }
-        throw gitFailure('git-control/spawn-failed', `git ${args[0]} failed to run: ${error instanceof Error ? error.message : String(error)}`);
+        throw gitFailure('git-control/spawn-failed', `${commandText} failed to run: ${error instanceof Error ? error.message : String(error)}`);
       }
 
       if (overflow) {
-        throw gitFailure('git-control/too-large', `git ${args[0]} produced more than ${MAX_IMAGE_BYTES} bytes.`);
+        throw gitFailure('git-control/too-large', `${commandText} produced more than ${MAX_IMAGE_BYTES} bytes.`);
       }
 
       const stderr = handle.collected?.stderr === undefined ? '' : handle.collected.stderr.readFrom(0).text;
@@ -488,8 +561,8 @@ class GitControl {
       if (!acceptCodes.includes(exitCode)) {
         throw gitFailure(
           'git-control/command-failed',
-          firstLine(stderr) || `git ${args[0]} failed (exit ${exitCode}).`,
-          { exitCode, command: ['git', ...args].join(' '), stderr: stderr.slice(0, 4000) },
+          firstLine(stderr) || `${commandText} failed (exit ${exitCode}).`,
+          { exitCode, command: commandText, stderr: stderr.slice(0, 4000) },
         );
       }
       if (binary) {
@@ -976,6 +1049,199 @@ class GitControl {
       : ['push'];
     const result = await this.run(root, args, { signal, timeoutMs: NETWORK_TIMEOUT_MS });
     return { message: lastLine(result.stderr) || lastLine(result.stdout) || 'Pushed.' };
+  }
+
+  /**
+   * Check whether the GitHub CLI is installed and signed in.
+   * @param root - repository root the tool runs in.
+   * @param signal - caller cancellation.
+   * @returns `{ installed, authenticated }`.
+   */
+  async ghState(root, signal) {
+    let version;
+    try {
+      version = await this.runTool(root, ['gh', '--version'], {
+        signal,
+        env: GH_ENV,
+        acceptCodes: [0, 1],
+      });
+    } catch (error) {
+      if (error?.code === 'git-control/spawn-failed') return { installed: false, authenticated: false };
+      throw error;
+    }
+    if (version.exitCode !== 0) return { installed: false, authenticated: false };
+    const auth = await this.runTool(root, ['gh', 'auth', 'status'], {
+      signal,
+      env: GH_ENV,
+      acceptCodes: [0, 1],
+    });
+    return { installed: true, authenticated: auth.exitCode === 0 };
+  }
+
+  /**
+   * List the branch a pull request may target, the remote's default first.
+   * @param root - repository root.
+   * @param head - the branch the pull request comes from, left out.
+   * @param signal - caller cancellation.
+   * @returns `{ base, bases }`.
+   */
+  async baseBranches(root, head, signal) {
+    const [remoteHead, refs] = await Promise.all([
+      this.run(root, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], { signal, acceptCodes: [0, 1, 128] }),
+      this.run(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes'], { signal }),
+    ]);
+    const remoteDefault = remoteHead.exitCode === 0 ? remoteHead.stdout.trim().replace(/^origin\//, '') : '';
+    const available = new Set();
+    for (const ref of refs.stdout.split('\n').map((entry) => entry.trim())) {
+      if (ref === '' || ref === 'origin' || ref.endsWith('/HEAD')) continue;
+      const name = ref.startsWith('origin/') ? ref.slice('origin/'.length) : ref;
+      if (name !== '' && name !== head) available.add(name);
+    }
+    const bases = [];
+    for (const name of [remoteDefault, ...BASE_BRANCH_ORDER]) {
+      if (name !== '' && available.has(name) && !bases.includes(name)) bases.push(name);
+    }
+    for (const name of [...available].sort()) {
+      if (!bases.includes(name)) bases.push(name);
+    }
+    const capped = bases.slice(0, MAX_PR_BASES);
+    return { base: capped.length === 0 ? null : capped[0], bases: capped };
+  }
+
+  /**
+   * Find the open pull request whose head is one branch, when there is one.
+   * @param root - repository root.
+   * @param branch - the head branch.
+   * @param signal - caller cancellation.
+   * @returns `{ url, number }`, or null.
+   */
+  async existingPullRequest(root, branch, signal) {
+    const result = await this.runTool(root, [
+      'gh',
+      'pr',
+      'list',
+      '--head',
+      branch,
+      '--state',
+      'open',
+      '--json',
+      'url,number',
+      '--limit',
+      '1',
+    ], { signal, timeoutMs: NETWORK_TIMEOUT_MS, env: GH_ENV, acceptCodes: [0, 1] });
+    if (result.exitCode !== 0) return null;
+    try {
+      const rows = JSON.parse(result.stdout === '' ? '[]' : result.stdout);
+      const first = Array.isArray(rows) ? rows[0] : null;
+      if (first === null || first === undefined || typeof first.url !== 'string') return null;
+      return { url: first.url, number: typeof first.number === 'number' ? first.number : null };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Report whether the current branch can open a pull request, and against which
+   * base branches it may do so.
+   * @param input - `{ path }`.
+   * @param signal - caller cancellation.
+   * @returns branch, GitHub CLI state, base candidates, and any open request.
+   */
+  async pullRequestInfo(input, signal) {
+    const root = await this.root(input?.path, signal);
+    const status = await this.status({ path: root }, signal);
+    if (status.detached || status.branch === null) {
+      return { branch: null, gh: false, authenticated: false, base: null, bases: [], existing: null };
+    }
+    const [gh, branches] = await Promise.all([
+      this.ghState(root, signal),
+      this.baseBranches(root, status.branch, signal),
+    ]);
+    const existing = gh.installed && gh.authenticated
+      ? await this.existingPullRequest(root, status.branch, signal)
+      : null;
+    return {
+      branch: status.branch,
+      gh: gh.installed,
+      authenticated: gh.authenticated,
+      base: branches.base,
+      bases: branches.bases,
+      existing,
+    };
+  }
+
+  /**
+   * Create one pull request for the current branch with the GitHub CLI.
+   * @param input - `{ path, title, body, base }`.
+   * @param signal - caller cancellation.
+   * @returns the pull request URL and whether one was already open.
+   */
+  async createPullRequest(input, signal) {
+    const root = await this.root(input?.path, signal);
+    const status = await this.status({ path: root }, signal);
+    if (status.detached || status.branch === null) {
+      throw gitFailure('git-control/no-branch', 'Check out a branch before opening a pull request.');
+    }
+    if (status.files.length > 0) {
+      throw gitFailure('git-control/dirty', 'Commit or discard the working changes before opening a pull request.');
+    }
+    if (status.upstream === null || status.upstreamGone) {
+      throw gitFailure('git-control/unpushed', 'Push the branch before opening a pull request.');
+    }
+    if (status.ahead > 0 || status.behind > 0) {
+      throw gitFailure('git-control/unpushed', 'Sync the branch with its upstream before opening a pull request.');
+    }
+    if (PROTECTED_BRANCHES.has(status.branch)) {
+      throw gitFailure(
+        'git-control/protected-branch',
+        `${status.branch} is a base branch: open a pull request from a feature branch instead.`,
+      );
+    }
+    const title = requirePullRequestTitle(input?.title);
+    const body = requirePullRequestBody(input?.body);
+    const base = requireBranchName(input?.base);
+    if (base === status.branch) {
+      throw gitFailure('git-control/bad-request', 'The base branch must differ from the head branch.');
+    }
+
+    const gh = await this.ghState(root, signal);
+    if (!gh.installed) {
+      throw gitFailure('git-control/no-gh', 'The GitHub CLI (gh) is not installed, so no pull request can be created.');
+    }
+    if (!gh.authenticated) {
+      throw gitFailure('git-control/gh-unauthenticated', 'The GitHub CLI is not signed in: run `gh auth login` first.');
+    }
+
+    const existing = await this.existingPullRequest(root, status.branch, signal);
+    if (existing !== null) {
+      return {
+        url: existing.url,
+        number: existing.number,
+        existing: true,
+        message: `A pull request for ${status.branch} is already open.`,
+      };
+    }
+
+    const result = await this.runTool(root, [
+      'gh',
+      'pr',
+      'create',
+      '--base',
+      base,
+      '--head',
+      status.branch,
+      '--title',
+      title,
+      '--body',
+      body,
+    ], { signal, timeoutMs: NETWORK_TIMEOUT_MS, env: GH_ENV });
+    const url = findUrl(result.stdout) ?? findUrl(result.stderr);
+    return {
+      url,
+      number: null,
+      existing: false,
+      message: url === null ? `Opened a pull request for ${status.branch}.` : `Opened ${url}`,
+    };
   }
 
   /**
