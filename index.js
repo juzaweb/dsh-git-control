@@ -115,6 +115,7 @@ const ACTIONS = new Set([
   'generateCommitMessage',
   'pullRequestInfo',
   'createPullRequest',
+  'mergePullRequest',
   'checkoutBase',
   'deleteWorktree',
 ]);
@@ -137,6 +138,7 @@ const MUTATING_ACTIONS = new Set([
   'revert',
   'reset',
   'stageAll',
+  'mergePullRequest',
   'checkoutBase',
 ]);
 
@@ -1478,6 +1480,52 @@ class GitControl {
       number: null,
       existing: false,
       message: url === null ? `Opened a pull request for ${status.branch}.` : `Opened ${url}`,
+    };
+  }
+
+  /**
+   * Merge the open pull request of the current branch with the GitHub CLI.
+   * @param input - `{ path }`.
+   * @param signal - caller cancellation.
+   * @returns the merged branch, its base, and a one-line summary.
+   */
+  async mergePullRequest(input, signal) {
+    const root = await this.root(input?.path, signal);
+    const status = await this.status({ path: root }, signal);
+    if (status.detached || status.branch === null) {
+      throw gitFailure('git-control/no-branch', 'Check out a branch before merging its pull request.');
+    }
+
+    const gh = await this.ghState(root, signal);
+    if (!gh.installed) {
+      throw gitFailure('git-control/no-gh', 'The GitHub CLI (gh) is not installed, so no pull request can be merged.');
+    }
+    if (!gh.authenticated) {
+      throw gitFailure('git-control/gh-unauthenticated', 'The GitHub CLI is not signed in: run `gh auth login` first.');
+    }
+
+    const state = await this.pullRequestState(root, status.branch, signal);
+    if (state === null || state.state !== 'OPEN') {
+      throw gitFailure(
+        'git-control/no-pull-request',
+        `No open pull request was found for ${status.branch}, so there is nothing to merge.`,
+      );
+    }
+
+    await this.runTool(root, ['gh', 'pr', 'merge', status.branch, '--merge'], {
+      signal,
+      timeoutMs: NETWORK_TIMEOUT_MS,
+      env: GH_ENV,
+    });
+
+    const base = state.baseRefName;
+    return {
+      branch: status.branch,
+      base,
+      url: state.url,
+      message: base === null
+        ? `Merged the pull request for ${status.branch}.`
+        : `Merged ${status.branch} into ${base}.`,
     };
   }
 

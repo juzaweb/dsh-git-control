@@ -64,6 +64,11 @@ editable, and typing in it stops the panel from writing over it.
 the Host. An open pull request for the same branch is shown as a link instead of
 a second form, and the panel never opens one on its own.
 
+Once a pull request is open — whether it was created here or already existed —
+the card offers **Merge pull request**. It asks first, naming the head branch and
+the `gh pr merge <branch> --merge` command it will run, then rereads the state so
+the merged summary replaces the composer. Nothing merges without that confirmation.
+
 When `gh pr view <branch>` reports the branch's pull request as **merged**, the
 card switches to a merged summary carrying the base branch and a link to the
 request, plus the two ways out of the merged branch:

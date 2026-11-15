@@ -203,6 +203,10 @@ window.__ModuleLoader__.load({
       'pr.open': 'Open pull request',
       'pr.existing': 'A pull request is already open for this branch.',
       'pr.opened': 'Pull request created.',
+      'pr.merge': 'Merge pull request',
+      'pr.mergeHint': 'Merge this pull request into its base branch',
+      'pr.mergeConfirm': 'Merge the pull request for {branch}? The base branch changes on the remote and this cannot be undone here.',
+      'pr.mergeCommand': 'gh pr merge {branch} --merge',
       'pr.noGh': 'The GitHub CLI (gh) is not installed: install it to open pull requests here.',
       'pr.notAuthenticated': 'The GitHub CLI is not signed in: run `gh auth login` first.',
       'pr.merged': 'Pull request merged',
@@ -1081,6 +1085,33 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /** Merge the open pull request, then reread the pull request state. */
+      const runMergePullRequest = async () => {
+        setPrBusy(true);
+        setError(null);
+        try {
+          await callApi({ action: 'mergePullRequest', path: chosenPath });
+          setPrResult(null);
+          setPrReload((current) => current + 1);
+          setRevision((current) => current + 1);
+        } catch (err) {
+          setError(failureOf(err));
+        } finally {
+          setPrBusy(false);
+        }
+      };
+
+      /** Ask before merging the open pull request, which changes the remote. */
+      const askMergePullRequest = () => ask({
+        title: t('pr.merge'),
+        description: t('pr.mergeConfirm', { branch: prBranch }),
+        command: t('pr.mergeCommand', { branch: prBranch }),
+        onConfirm: () => {
+          setConfirm(null);
+          void runMergePullRequest();
+        },
+      });
+
       /** Remove the linked worktree this session runs in, moving it to the main checkout. */
       const deleteWorktree = async () => {
         setPrBusy(true);
@@ -1269,7 +1300,27 @@ window.__ModuleLoader__.load({
         const canSubmit = !prBusy && prTitle.trim() !== '' && base !== '';
 
         const body = existingUrl !== null
-          ? h('p', { className: 'gctl-hint' }, prResult === null ? t('pr.existing') : t('pr.opened'))
+          ? h(
+              'div',
+              { className: 'gctl-prForm' },
+              h('p', { className: 'gctl-hint' }, prResult === null ? t('pr.existing') : t('pr.opened')),
+              h(
+                'div',
+                { className: 'gctl-prRow' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'gctl-mainActionButton gctl-primary',
+                    title: t('pr.mergeHint'),
+                    disabled: prBusy,
+                    onClick: () => askMergePullRequest(),
+                  },
+                  h(Glyph, { name: 'check', size: 14 }),
+                  h('span', null, prBusy ? t('working') : t('pr.merge')),
+                ),
+              ),
+            )
           : prInfo === null || prInfo.phase === 'loading'
             ? h('p', { className: 'gctl-hint' }, t('pr.loading'))
             : prInfo.phase === 'error'
