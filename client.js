@@ -29,6 +29,51 @@ window.__ModuleLoader__.load({
     const POLL_INTERVAL_MS = 3000;
     /** Branches a pull request is opened against, never from. */
     const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
+    /** Panel states kept across tab switches and panel remounts, per repository. */
+    const PANEL_CACHE = new Map();
+    /** How many repositories keep a cached panel state. */
+    const PANEL_CACHE_LIMIT = 8;
+
+    /** The empty panel state a repository starts from. */
+    const emptyPanelState = () => ({
+      status: null,
+      tab: 'changes',
+      branches: null,
+      commits: null,
+      stashes: null,
+      logLimit: LOG_STEP,
+      selected: null,
+      diff: null,
+      collapsedGroups: {},
+      message: '',
+    });
+
+    /**
+     * Read one repository's cached panel state.
+     * @param path - repository path, or null when none is chosen.
+     * @returns the cached state, or null when the repository was never shown.
+     */
+    function readPanelState(path) {
+      if (typeof path !== 'string' || path === '') return null;
+      return PANEL_CACHE.get(path) ?? null;
+    }
+
+    /**
+     * Record one repository's panel state, evicting the oldest repository once
+     * the cache is full.
+     * @param path - repository path, or null when none is chosen.
+     * @param state - the state to remember.
+     */
+    function writePanelState(path, state) {
+      if (typeof path !== 'string' || path === '') return;
+      PANEL_CACHE.delete(path);
+      PANEL_CACHE.set(path, state);
+      while (PANEL_CACHE.size > PANEL_CACHE_LIMIT) {
+        const oldest = PANEL_CACHE.keys().next();
+        if (oldest.done === true) return;
+        PANEL_CACHE.delete(oldest.value);
+      }
+    }
 
     const DICTIONARY = {
       'type.label': 'Git',
@@ -618,28 +663,31 @@ window.__ModuleLoader__.load({
         : useWorkspaces((snapshot) => snapshot.items);
 
       const [repoPath, setRepoPath] = React.useState(null);
-      const [status, setStatus] = React.useState(null);
-      const [phase, setPhase] = React.useState('idle');
+      const chosenPath = fixedPath ?? repoPath ?? (workspaces.length > 0 ? workspaces[0].path : null);
+      const cached = readPanelState(chosenPath) ?? emptyPanelState();
+
+      const [status, setStatus] = React.useState(cached.status);
+      const [phase, setPhase] = React.useState(cached.status === null ? 'idle' : 'ready');
       const [revision, setRevision] = React.useState(0);
-      const [tab, setTab] = React.useState('changes');
+      const [tab, setTab] = React.useState(cached.tab);
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState(null);
-      const [message, setMessage] = React.useState('');
+      const [message, setMessage] = React.useState(cached.message);
       const [stashMessage, setStashMessage] = React.useState('');
       const [stashUntracked, setStashUntracked] = React.useState(true);
-      const [selected, setSelected] = React.useState(null);
-      const [diff, setDiff] = React.useState(null);
-      const prevSelectedRef = React.useRef(null);
+      const [selected, setSelected] = React.useState(cached.selected);
+      const [diff, setDiff] = React.useState(cached.diff);
+      const prevSelectedRef = React.useRef(cached.selected);
       const isBusyOrInFlightRef = React.useRef(false);
-      const [branches, setBranches] = React.useState(null);
-      const [commits, setCommits] = React.useState(null);
-      const [logLimit, setLogLimit] = React.useState(LOG_STEP);
-      const [stashes, setStashes] = React.useState(null);
+      const [branches, setBranches] = React.useState(cached.branches);
+      const [commits, setCommits] = React.useState(cached.commits);
+      const [logLimit, setLogLimit] = React.useState(cached.logLimit);
+      const [stashes, setStashes] = React.useState(cached.stashes);
       const [newBranch, setNewBranch] = React.useState('');
       const [switchOnCreate, setSwitchOnCreate] = React.useState(true);
       const [confirm, setConfirm] = React.useState(null);
       const [generating, setGenerating] = React.useState(false);
-      const [collapsedGroups, setCollapsedGroups] = React.useState({});
+      const [collapsedGroups, setCollapsedGroups] = React.useState(cached.collapsedGroups);
       const [prInfo, setPrInfo] = React.useState(null);
       const [prTitle, setPrTitle] = React.useState('');
       const [prBody, setPrBody] = React.useState('');
@@ -650,8 +698,49 @@ window.__ModuleLoader__.load({
 
       const toggleGroup = (key) => setCollapsedGroups((current) => ({ ...current, [key]: !current[key] }));
 
-      const chosenPath = fixedPath ?? repoPath ?? (workspaces.length > 0 ? workspaces[0].path : null);
       isBusyOrInFlightRef.current = busy || generating || confirm !== null || phase === 'refreshing' || phase === 'loading';
+
+      /* The repository the state in hand belongs to, so a switch never writes across. */
+      const statePathRef = React.useRef(chosenPath);
+
+      /* Remember everything the panel shows, so a remount reopens it in place. */
+      React.useEffect(() => {
+        if (statePathRef.current !== chosenPath) return;
+        writePanelState(chosenPath, {
+          status,
+          tab,
+          branches,
+          commits,
+          stashes,
+          logLimit,
+          selected,
+          diff,
+          collapsedGroups,
+          message,
+        });
+      }, [chosenPath, status, tab, branches, commits, stashes, logLimit, selected, diff, collapsedGroups, message]);
+
+      /*
+       * Show the cached state of the chosen repository as soon as it changes, so
+       * switching back to the panel paints the previous view instead of an empty
+       * one while the first read is in flight.
+       */
+      React.useEffect(() => {
+        const entry = readPanelState(chosenPath) ?? emptyPanelState();
+        setStatus(entry.status);
+        setPhase(entry.status === null ? 'idle' : 'ready');
+        setTab(entry.tab);
+        setBranches(entry.branches);
+        setCommits(entry.commits);
+        setStashes(entry.stashes);
+        setLogLimit(entry.logLimit);
+        setSelected(entry.selected);
+        setDiff(entry.diff);
+        setCollapsedGroups(entry.collapsedGroups);
+        setMessage(entry.message);
+        prevSelectedRef.current = entry.selected;
+        statePathRef.current = chosenPath;
+      }, [chosenPath]);
 
       /* Read the status of the selected repository. */
       React.useEffect(() => {
@@ -802,14 +891,10 @@ window.__ModuleLoader__.load({
         }
       }, [status]);
 
-      /* Reset tab data when switching tabs or changing repository. */
-      React.useEffect(() => {
-        setBranches(null);
-        setCommits(null);
-        setStashes(null);
-      }, [tab, chosenPath]);
-
-      /* Read the active tab's own data. */
+      /*
+       * Read the active tab's own data. Each tab keeps what it already read, so
+       * returning to a tab paints it immediately and the read only refreshes it.
+       */
       React.useEffect(() => {
         if (chosenPath === null || status === null) return undefined;
         const controller = new AbortController();
