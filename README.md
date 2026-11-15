@@ -16,9 +16,10 @@ Sidebar's narrow layout.
 
 Any directory that git recognises works: the Host resolves
 `git rev-parse --show-toplevel` and every later command runs at that root. The
-directory is the one the Session reports, so a Session moved into a linked
-worktree inspects that worktree; the Workspace path is only the fallback while
-the Session reports none.
+directory is the Session's live `workingDirectory` projection, so a Session that
+`cd`-ed or moved into a linked worktree inspects that worktree; the Session
+header's immutable `cwd` and the Workspace path are only the fallbacks while no
+projection value has landed.
 
 ## What it does
 
@@ -161,6 +162,9 @@ namespace and translates them through `ctx.locale`. The Host half exposes
 The tab type registers through `ctx.inject(['sidebarRightTabs'], …)` so it
 survives a load order where the right Sidebar mounts after this bundle. Its body
 reads the open Session id from the slot's standard props, takes that Session's
-working directory from `useSessions`, and falls back to the matching Workspace
-path from `useWorkspaces` while the Session reports no directory. A Session with
-neither shows a hint instead of calling git.
+live working directory from the `workingDirectory` projection through
+`useProjection`, then falls back to the Session header `cwd` from `useSessions`
+and to the matching Workspace path from `useWorkspaces`. The projection is the
+only source that follows a `cd` or a created worktree, because the Session header
+keeps the project the Session was opened in. A Session with none of the three
+shows a hint instead of calling git.

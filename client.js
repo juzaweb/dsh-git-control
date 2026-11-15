@@ -2170,24 +2170,33 @@ window.__ModuleLoader__.load({
      * Render the right-Sidebar tab body for the open Session's working
      * directory. The directory the Session runs in is the repository the panel
      * drives, so a Session that moved into a Git worktree inspects that
-     * worktree instead of the Workspace it was opened from. The Workspace path
-     * is the fallback for a Session that reports no directory yet.
+     * worktree instead of the Workspace it was opened from.
+     *
+     * The Session header's `cwd` is immutable: it records the project the
+     * Session was opened in, and stays put after `cd` or a created worktree.
+     * The live directory is the `workingDirectory` projection, which the
+     * Session updates through its `working-directory/change` event, so the
+     * projection answers first and the header cwd and Workspace path are the
+     * fallbacks for a Session that has not reported one yet.
      * @param props - slot props: localized copy, the workspace and session
-     * selector hooks, and the Session id.
+     * selector hooks, the projection reader, and the Session id.
      * @returns the compact panel, or a hint when no directory is known.
      */
     function GitRightPane(props) {
-      const { t, useWorkspaces, useSessions, sessionId } = props;
+      const { t, useWorkspaces, useSessions, useProjection, sessionId } = props;
       const workspaces = useWorkspaces === undefined
         ? []
         : useWorkspaces((snapshot) => snapshot.items);
       const sessionDirectory = useSessions === undefined
         ? undefined
         : useSessions((sessions) => sessions.byId[sessionId]?.cwd);
+      const liveDirectory = typeof useProjection === 'function' ? useProjection('workingDirectory') : undefined;
       const workspace = workspaces.find((entry) => entry.sessionIds.includes(sessionId));
-      const directory = typeof sessionDirectory === 'string' && sessionDirectory !== ''
-        ? sessionDirectory
-        : workspace?.path;
+      const directory = typeof liveDirectory === 'string' && liveDirectory !== ''
+        ? liveDirectory
+        : typeof sessionDirectory === 'string' && sessionDirectory !== ''
+          ? sessionDirectory
+          : workspace?.path;
 
       if (typeof directory !== 'string' || directory === '') {
         return h(
