@@ -115,6 +115,8 @@ const ACTIONS = new Set([
   'generateCommitMessage',
   'pullRequestInfo',
   'createPullRequest',
+  'checkoutBase',
+  'deleteWorktree',
 ]);
 
 /** Actions that change the work tree, index, refs, or the remote. */
@@ -135,6 +137,7 @@ const MUTATING_ACTIONS = new Set([
   'revert',
   'reset',
   'stageAll',
+  'checkoutBase',
 ]);
 
 /**
@@ -1141,24 +1144,103 @@ class GitControl {
   }
 
   /**
+   * Read the most recent pull request whose head is one branch, in any state.
+   * @param root - repository root.
+   * @param branch - the head branch.
+   * @param signal - caller cancellation.
+   * @returns `{ state, url, number, baseRefName, mergedAt }`, or null.
+   */
+  async pullRequestState(root, branch, signal) {
+    const result = await this.runTool(root, [
+      'gh',
+      'pr',
+      'view',
+      branch,
+      '--json',
+      'state,mergedAt,url,number,baseRefName',
+    ], { signal, timeoutMs: NETWORK_TIMEOUT_MS, env: GH_ENV, acceptCodes: [0, 1] });
+    if (result.exitCode !== 0) return null;
+    try {
+      const row = JSON.parse(result.stdout === '' ? 'null' : result.stdout);
+      if (row === null || typeof row !== 'object' || typeof row.state !== 'string') return null;
+      return {
+        state: row.state,
+        url: typeof row.url === 'string' ? row.url : null,
+        number: typeof row.number === 'number' ? row.number : null,
+        baseRefName: typeof row.baseRefName === 'string' ? row.baseRefName : null,
+        mergedAt: typeof row.mergedAt === 'string' ? row.mergedAt : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Read the registered checkouts of one repository.
+   * @param root - repository root the caller runs in.
+   * @param signal - caller cancellation.
+   * @returns `{ isLinked, main, current, branch, detached, count }`.
+   */
+  async worktreeState(root, signal) {
+    const result = await this.run(root, ['worktree', 'list', '--porcelain'], { signal, acceptCodes: [0, 128] });
+    const plain = { isLinked: false, main: root, current: root, branch: null, detached: false, count: 1 };
+    if (result.exitCode !== 0) return plain;
+
+    const entries = [];
+    let entry = null;
+    for (const raw of result.stdout.split('\n')) {
+      const line = raw.trimEnd();
+      if (line.startsWith('worktree ')) {
+        entry = { path: line.slice('worktree '.length), branch: null, detached: false };
+        entries.push(entry);
+      } else if (entry !== null && line.startsWith('branch ')) {
+        entry.branch = line.slice('branch '.length).replace(/^refs\/heads\//u, '');
+      } else if (entry !== null && line === 'detached') {
+        entry.detached = true;
+      }
+    }
+    if (entries.length === 0) return plain;
+
+    const normalize = (value) => value.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase();
+    const main = entries[0];
+    const current = entries.find((candidate) => normalize(candidate.path) === normalize(root)) ?? null;
+    return {
+      isLinked: entries.length > 1 && current !== null && current !== main,
+      main: main.path,
+      current: current === null ? root : current.path,
+      branch: current === null ? null : current.branch,
+      detached: current === null ? false : current.detached,
+      count: entries.length,
+    };
+  }
+
+  /**
    * Report whether the current branch can open a pull request, and against which
    * base branches it may do so.
    * @param input - `{ path }`.
    * @param signal - caller cancellation.
-   * @returns branch, GitHub CLI state, base candidates, and any open request.
+   * @returns branch, GitHub CLI state, base candidates, any open request, whether
+   * the branch's pull request already merged, and the worktree it runs in.
    */
   async pullRequestInfo(input, signal) {
     const root = await this.root(input?.path, signal);
     const status = await this.status({ path: root }, signal);
+    const worktree = await this.worktreeState(root, signal);
     if (status.detached || status.branch === null) {
-      return { branch: null, gh: false, authenticated: false, base: null, bases: [], existing: null };
+      return { branch: null, gh: false, authenticated: false, base: null, bases: [], existing: null, merged: null, worktree };
     }
     const [gh, branches] = await Promise.all([
       this.ghState(root, signal),
       this.baseBranches(root, status.branch, signal),
     ]);
-    const existing = gh.installed && gh.authenticated
-      ? await this.existingPullRequest(root, status.branch, signal)
+    const state = gh.installed && gh.authenticated
+      ? await this.pullRequestState(root, status.branch, signal)
+      : null;
+    const existing = state !== null && state.state === 'OPEN'
+      ? { url: state.url, number: state.number }
+      : null;
+    const merged = state !== null && state.state === 'MERGED'
+      ? { url: state.url, number: state.number, base: state.baseRefName, mergedAt: state.mergedAt }
       : null;
     return {
       branch: status.branch,
@@ -1167,6 +1249,109 @@ class GitControl {
       base: branches.base,
       bases: branches.bases,
       existing,
+      merged,
+      worktree,
+    };
+  }
+
+  /**
+   * Switch the repository to a base branch and fast-forward it.
+   * @param input - `{ path, base }`.
+   * @param signal - caller cancellation.
+   * @returns a one-line summary.
+   */
+  async checkoutBase(input, signal) {
+    const root = await this.root(input?.path, signal);
+    const base = requireBranchName(input?.base);
+    const status = await this.status({ path: root }, signal);
+    if (status.files.length > 0) {
+      throw gitFailure('git-control/dirty', 'Commit or discard the working changes before switching branches.');
+    }
+    if (status.branch === base) {
+      throw gitFailure('git-control/bad-request', `This repository is already on ${base}.`);
+    }
+    const local = await this.run(root, ['rev-parse', '--verify', '--quiet', `refs/heads/${base}`], {
+      signal,
+      acceptCodes: [0, 1, 128],
+    });
+    if (local.exitCode === 0) {
+      await this.run(root, ['checkout', base], { signal });
+    } else {
+      const remote = await this.run(root, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${base}`], {
+        signal,
+        acceptCodes: [0, 1, 128],
+      });
+      if (remote.exitCode !== 0) {
+        throw gitFailure(
+          'git-control/no-base-branch',
+          `${base} exists neither locally nor on origin, so there is nothing to switch to.`,
+        );
+      }
+      await this.run(root, ['checkout', '--track', `origin/${base}`], { signal, timeoutMs: NETWORK_TIMEOUT_MS });
+    }
+    const pull = await this.run(root, ['pull', '--ff-only'], {
+      signal,
+      timeoutMs: NETWORK_TIMEOUT_MS,
+      acceptCodes: [0, 1, 128],
+    });
+    return {
+      message: pull.exitCode === 0 ? `Switched to ${base} and fast-forwarded it.` : `Switched to ${base}.`,
+      branch: base,
+    };
+  }
+
+  /**
+   * Move the Session to the main checkout, then remove the linked worktree it
+   * was running in. The checkout must be clean: git refuses to remove one that
+   * holds uncommitted work, and that refusal is reported before anything moves.
+   * @param input - `{ path, sessionId }`.
+   * @param signal - caller cancellation.
+   * @returns a one-line summary and the main checkout the Session moved to.
+   */
+  async deleteWorktree(input, signal) {
+    const root = await this.root(input?.path, signal);
+    const worktree = await this.worktreeState(root, signal);
+    if (worktree.isLinked !== true) {
+      throw gitFailure(
+        'git-control/not-a-worktree',
+        'This directory is the main checkout, so there is no linked worktree to remove.',
+      );
+    }
+    const status = await this.status({ path: root }, signal);
+    if (status.files.length > 0) {
+      throw gitFailure(
+        'git-control/dirty',
+        'Commit or discard the working changes in this worktree before removing it.',
+      );
+    }
+
+    const agents = this.ctx.get('agents');
+    const workingDirectory = this.ctx.get('workingDirectory');
+    const sessionId = typeof input?.sessionId === 'string' ? input.sessionId : '';
+    if (agents === undefined || workingDirectory === undefined) {
+      throw gitFailure(
+        'git-control/no-session',
+        'The session directory service is unavailable, so the session cannot be moved out of this worktree.',
+      );
+    }
+    const agent = sessionId === '' ? undefined : agents.get(sessionId);
+    if (agent === undefined) {
+      throw gitFailure(
+        'git-control/no-session',
+        'This session is not live, so it cannot be moved out of the worktree before removing it.',
+      );
+    }
+
+    /* Move the Session first, then remove: the status check above already
+       excluded the refusal git gives for uncommitted work, and this order never
+       leaves the Session pointing at a directory that is already gone. A failed
+       removal leaves the worktree registered in a workable state. */
+    await workingDirectory.set(agent, worktree.main, signal);
+    await this.run(worktree.main, ['worktree', 'remove', worktree.current], { signal });
+
+    return {
+      message: `Removed the worktree at ${worktree.current}.`,
+      main: worktree.main,
     };
   }
 
@@ -1513,6 +1698,9 @@ class GitControl {
 
     try {
       const data = await this[action](input, signal);
+      /* deleteWorktree is absent from MUTATING_ACTIONS: the directory it removed
+         no longer exists, and the Session's directory change remounts the panel
+         on the main checkout by itself. */
       if (MUTATING_ACTIONS.has(action)) {
         data.status = await this.status({ path: input.path }, signal);
       }

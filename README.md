@@ -61,6 +61,21 @@ description, and a base-branch picker seeded with the remote's default branch.
 the Host. An open pull request for the same branch is shown as a link instead of
 a second form, and the panel never opens one on its own.
 
+When `gh pr view <branch>` reports the branch's pull request as **merged**, the
+card switches to a merged summary carrying the base branch and a link to the
+request, plus the two ways out of the merged branch:
+
+| Control | Shown when | What it runs |
+| --- | --- | --- |
+| **Delete worktree** | the session runs in a linked worktree, and that checkout is clean | `ctx.workingDirectory.set` to the main checkout, then `git worktree remove <checkout>` |
+| **Switch to \<base\>** | the session runs in the main checkout, the tree is clean, and the base branch exists locally or on `origin` | `git checkout <base>` (tracking `origin/<base>` when no local branch exists) and `git pull --ff-only` |
+
+A dirty checkout hides the merged card's actions rather than offering a button git
+would refuse. The removal is never forced: the Host checks `git status` first, so
+neither a lock nor an uncommitted file is discarded. The merged state is reread on
+a slow timer (45 s) while the panel is visible, because a merge happens outside
+this workspace.
+
 The composer needs the GitHub CLI on the Host. A missing `gh` is named in the
 card, and an installed but signed-out CLI asks for `gh auth login`.
 

@@ -27,6 +27,8 @@ window.__ModuleLoader__.load({
     const LOG_STEP = 40;
     /** Polling interval when the panel is open and visible. */
     const POLL_INTERVAL_MS = 3000;
+    /** Interval for the slower pull-request read, which talks to the remote. */
+    const PR_POLL_INTERVAL_MS = 45000;
     /** Branches a pull request is opened against, never from. */
     const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
     /** Panel states kept across tab switches and panel remounts, per repository. */
@@ -202,6 +204,16 @@ window.__ModuleLoader__.load({
       'pr.opened': 'Pull request created.',
       'pr.noGh': 'The GitHub CLI (gh) is not installed: install it to open pull requests here.',
       'pr.notAuthenticated': 'The GitHub CLI is not signed in: run `gh auth login` first.',
+      'pr.merged': 'Pull request merged',
+      'pr.mergedSubtitle': '{branch} → {base} · merged',
+      'pr.mergedSubtitleUnknown': '{branch} · merged',
+      'pr.mergedHint': 'The branch is merged, so this work is already in its base branch.',
+      'pr.mergedHintMain': 'This directory is the main checkout: switch it to the base branch to continue there.',
+      'pr.mergedLink': 'Open pull request',
+      'wt.delete': 'Delete worktree',
+      'wt.deleteHint': 'Move the session to {main} and remove {path}',
+      'base.checkout': 'Switch to {base}',
+      'base.checkoutHint': 'Check out {base} and fast-forward it to the remote',
       'notice.failed': 'The git command failed.',
       'view.noDirectory': 'This session has no working directory to inspect.',
     };
@@ -657,7 +669,7 @@ window.__ModuleLoader__.load({
      * @returns the panel element.
      */
     function GitControlPage(props) {
-      const { t, useWorkspaces, fixedPath, compact = false } = props;
+      const { t, useWorkspaces, fixedPath, compact = false, sessionId = null } = props;
       const workspaces = useWorkspaces === undefined
         ? []
         : useWorkspaces((snapshot) => snapshot.items);
@@ -845,9 +857,15 @@ window.__ModuleLoader__.load({
         setPrResult(null);
       }, [prBranch, chosenPath]);
 
+      /**
+       * The branch any pull request card can describe: a real branch that a
+       * pull request is opened from, never one it is opened against.
+       */
+      const prTarget = prBranch !== null && !PROTECTED_BRANCHES.has(prBranch) ? prBranch : null;
+
       /* Read the pull request state once, and again after a create attempt. */
       React.useEffect(() => {
-        if (!prEligible || chosenPath === null) {
+        if (prTarget === null || chosenPath === null) {
           setPrInfo(null);
           return undefined;
         }
@@ -864,7 +882,26 @@ window.__ModuleLoader__.load({
             setPrInfo({ phase: 'error', data: null, failure: failureOf(err) });
           });
         return () => controller.abort();
-      }, [prEligible, prBranch, chosenPath, prReload]);
+      }, [prTarget, chosenPath, prReload]);
+
+      /* What the pull request read found, for the cards below the composer. */
+      const prData = prInfo !== null && prInfo.phase === 'ready' ? prInfo.data : null;
+      const mergedPr = prData?.merged ?? null;
+      const worktree = prData?.worktree ?? null;
+      const mergedOpen = mergedPr !== null;
+
+      /*
+       * A merge happens elsewhere, so the panel rereads the pull request state
+       * on a slow timer while it is visible. It is far slower than the status
+       * poll because each read is a network call to the GitHub CLI.
+       */
+      React.useEffect(() => {
+        if (prTarget === null || chosenPath === null) return undefined;
+        const timer = setInterval(() => {
+          if (document.visibilityState === 'visible') setPrReload((current) => current + 1);
+        }, PR_POLL_INTERVAL_MS);
+        return () => clearInterval(timer);
+      }, [prTarget, chosenPath]);
 
       /* Keep the selected diff target in sync with updated file status. */
       React.useEffect(() => {
@@ -1034,6 +1071,40 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /** Remove the linked worktree this session runs in, moving it to the main checkout. */
+      const deleteWorktree = async () => {
+        setPrBusy(true);
+        setError(null);
+        try {
+          await callApi({
+            action: 'deleteWorktree',
+            path: chosenPath,
+            ...(sessionId === null ? {} : { sessionId }),
+          });
+          /* The removed directory no longer exists, so the session's directory
+             projection moves this panel to the main checkout by itself. */
+        } catch (err) {
+          setError(failureOf(err));
+        } finally {
+          setPrBusy(false);
+        }
+      };
+
+      /** Switch to the merged pull request's base branch and fast-forward it. */
+      const checkoutBase = async (base) => {
+        setPrBusy(true);
+        setError(null);
+        try {
+          await callApi({ action: 'checkoutBase', path: chosenPath, base });
+          setPrReload((current) => current + 1);
+          setRevision((current) => current + 1);
+        } catch (err) {
+          setError(failureOf(err));
+        } finally {
+          setPrBusy(false);
+        }
+      };
+
       const files = status === null ? [] : status.files;
       const stagedFiles = files.filter((file) => file.staged);
       const changedFiles = files.filter((file) => file.unstaged && !file.untracked && !file.conflicted);
@@ -1175,7 +1246,7 @@ window.__ModuleLoader__.load({
        * @returns the composer element, or null when the branch is not eligible.
        */
       const renderPullRequest = () => {
-        if (!prEligible) return null;
+        if (!prEligible || mergedOpen) return null;
         const info = prInfo !== null && prInfo.phase === 'ready' ? prInfo.data : null;
         const existingUrl = typeof prResult?.url === 'string'
           ? prResult.url
@@ -1277,6 +1348,79 @@ window.__ModuleLoader__.load({
               : t('pr.subtitle', { branch: prBranch, base }),
           ),
           body,
+        );
+      };
+
+      /**
+       * Render what follows a merged pull request: the merged facts, the base
+       * branch the work landed in, and the two ways out of the branch — remove
+       * the worktree this session runs in, or switch the checkout to the base.
+       * @returns the merged card, or null when the branch has no merged request.
+       */
+      const renderMerged = () => {
+        if (!mergedOpen || mergedPr === null || status === null || status.files.length > 0) return null;
+        const base = typeof mergedPr.base === 'string' && mergedPr.base !== '' ? mergedPr.base : '';
+        const inWorktree = worktree !== null && worktree.isLinked === true;
+        const canCheckout = !inWorktree && base !== '' && base !== prBranch && !status.detached;
+
+        return h(
+          'div',
+          { className: 'gctl-pr gctl-merged' },
+          h(
+            'div',
+            { className: 'gctl-prHead' },
+            h('span', { className: 'gctl-prTitle gctl-mergedTitle' }, h(Glyph, { name: 'check', size: 14 }), t('pr.merged')),
+            typeof mergedPr.url === 'string'
+              ? h('a', {
+                  className: 'gctl-prLink',
+                  href: mergedPr.url,
+                  target: '_blank',
+                  rel: 'noreferrer noopener',
+                }, t('pr.mergedLink'))
+              : null,
+          ),
+          h(
+            'p',
+            { className: 'gctl-prSubtitle' },
+            base === ''
+              ? t('pr.mergedSubtitleUnknown', { branch: prBranch })
+              : t('pr.mergedSubtitle', { branch: prBranch, base }),
+          ),
+          h('p', { className: 'gctl-hint' }, inWorktree ? t('pr.mergedHint') : t('pr.mergedHintMain')),
+          inWorktree || canCheckout
+            ? h(
+                'div',
+                { className: 'gctl-prRow' },
+                inWorktree
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'gctl-mainActionButton gctl-dangerSolid',
+                        title: t('wt.deleteHint', { main: worktree.main, path: worktree.current }),
+                        disabled: prBusy,
+                        onClick: () => void deleteWorktree(),
+                      },
+                      h(Glyph, { name: 'trash', size: 14 }),
+                      h('span', null, prBusy ? t('working') : t('wt.delete')),
+                    )
+                  : null,
+                canCheckout
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'gctl-mainActionButton gctl-primary',
+                        title: t('base.checkoutHint', { base }),
+                        disabled: prBusy,
+                        onClick: () => void checkoutBase(base),
+                      },
+                      h(Glyph, { name: 'switch', size: 14 }),
+                      h('span', null, prBusy ? t('working') : t('base.checkout', { base })),
+                    )
+                  : null,
+              )
+            : null,
         );
       };
 
@@ -1701,6 +1845,7 @@ window.__ModuleLoader__.load({
                                 ),
                               ),
                           renderPullRequest(),
+                          renderMerged(),
                         ),
                         renderGroup({
                           key: 'conflicts',
@@ -2157,6 +2302,7 @@ window.__ModuleLoader__.load({
 .gctl-prRow .gctl-mainActionButton{width:auto;flex:none;height:28px;font-size:12px}
 .gctl-prLink{color:var(--dsw-alias-brand-primary);font-size:12px;text-decoration:none;white-space:nowrap}
 .gctl-prLink:hover{text-decoration:underline}
+.gctl-merged .gctl-mergedTitle{color:var(--dsw-alias-state-success-primary)}
 .gctl-group{margin-bottom:18px}
 .gctl-groupHead{display:flex;align-items:center;justify-content:space-between;padding:4px 6px;margin:8px 0 4px;border-radius:6px;cursor:pointer;user-select:none}
 .gctl-groupHead:hover{background:var(--dsw-alias-bg-layer-1)}
@@ -2291,7 +2437,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'gctl-content' }, h('p', { className: 'gctl-hint' }, t('view.noDirectory'))),
         );
       }
-      return h(GitControlPage, { t, useWorkspaces, fixedPath: directory, compact: true });
+      return h(GitControlPage, { t, useWorkspaces, fixedPath: directory, compact: true, sessionId });
     }
 
     /**
