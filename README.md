@@ -62,9 +62,14 @@ which fails text contrast (2.3:1 for success, 2.2:1 for warning on white).
 
 The panel is a narrow column, so its layout responds to its own width through
 `@container` queries rather than to the viewport: the image pair stacks and the
-PR row becomes a column at 420px and 340px of panel width. Only the compact
-layout is rendered, so its rules are the only ones the stylesheet carries.
-Infinite motion is dropped under `prefers-reduced-motion`.
+PR row becomes a column at 420px and 340px of panel width. Only that layout is
+rendered, so the stylesheet carries no competing desktop rules. Infinite motion
+is dropped under `prefers-reduced-motion`.
+
+The surface variables (`--gctl-surface*`, `--gctl-line*`) are declared on
+`.gctl-page` **and** `.gctl-scrim`, because the confirmation dialog is portalled
+out of the panel; declaring them only on the page left the dialog's buttons and
+reset-mode cards without a fill or border.
 
 The tab strip follows the ARIA tabs pattern: it answers Arrow/Home/End, exposes
 one tab in the tab order, and each tab names the panel through `aria-controls`.
@@ -239,11 +244,18 @@ silently using another model.
 ```
 index.js          Host half: GitControl service, validation, and the two fetch routes
 client.js         Client half: the right-Sidebar tab type, its body, and its title
+test/             Behaviour and stylesheet-contract tests for client.js
 cordis.patch.yml  Bundle patch inserting the `git-control` row
 locale/en.json    Panel dictionary and bundle display metadata
 locale/zh.json    Chinese display metadata
 icon.svg          Bundle icon
 ```
+
+`test/` holds the client's behaviour tests. They boot `client.js` through a
+small stub loader — no browser, no build step — mount the components the plugin
+registers, and assert on rendered output plus a few stylesheet contracts (every
+`var(--gctl-*)` resolves, the dialog root carries the surface variables, the
+blocked-hover guard stays in place). Run them with `npm test`.
 
 The panel keeps its own strings in `client.js` under the `gitControl` locale
 namespace and translates them through `ctx.locale`. The Host half exposes
