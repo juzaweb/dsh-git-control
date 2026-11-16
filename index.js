@@ -14,6 +14,11 @@ import path from 'node:path';
 const LOCAL_TIMEOUT_MS = 30_000;
 /** Ceiling for operations that talk to a remote. */
 const NETWORK_TIMEOUT_MS = 180_000;
+/** Ceiling for resolving a remote's default branch, so an unreachable remote
+ * cannot stall the pull request composer on every open. */
+const REMOTE_DEFAULT_TIMEOUT_MS = 5_000;
+/** How long a failed default-branch probe is remembered before retrying. */
+const REMOTE_DEFAULT_RETRY_MS = 60_000;
 /** Collected output ceilings; git output is read once after exit. */
 const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
 const MAX_STDERR_BYTES = 1024 * 1024;
@@ -50,7 +55,11 @@ const MESSAGE_TIMEOUT_MS = 60_000;
 
 /** Branches that a pull request is opened *against*, never from. */
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
-/** Base branches offered first, after the remote's own default branch. */
+/**
+ * Last-resort base branches, used only when the remote's default branch cannot
+ * be resolved and the head branch records no origin. Conventional order, never
+ * a claim about the default: resolving the real default comes first.
+ */
 const BASE_BRANCH_ORDER = ['main', 'master', 'develop'];
 /** Ceilings for the pull request composer. */
 const PR_TITLE_MAX_CHARS = 200;
@@ -473,6 +482,9 @@ class GitControl {
     this.ctx = ctx;
     this.logger = logger;
     this.commitModel = commitModel;
+    /* Repositories whose default-branch probe failed, with the time it did, so
+       an unreachable remote is not re-probed on every panel refresh. */
+    this.remoteDefaultFailures = new Map();
   }
 
   /**
@@ -1097,6 +1109,103 @@ class GitControl {
   }
 
   /**
+   * Resolve the branch the remote considers its default.
+   *
+   * `refs/remotes/origin/HEAD` is a local cache that `git clone` writes and that
+   * `git init` + `git remote add` + `git fetch`, a pruned ref, or an old clone
+   * can leave missing or stale. The remote itself is asked when the cache is
+   * unusable, so the panel never guesses a default branch from a name order.
+   * @param root - repository root.
+   * @param head - the branch the pull request comes from.
+   * @param signal - caller cancellation.
+   * @returns the default branch name, or an empty string when unknown.
+   */
+  async remoteDefaultBranch(root, head, signal) {
+    const local = await this.run(root, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], {
+      signal,
+      acceptCodes: [0, 1, 128],
+    });
+    const cached = local.exitCode === 0 ? local.stdout.trim().replace(/^origin\//u, '') : '';
+    /* The cache only counts while the branch it names still exists: a pruned
+       remote branch leaves origin/HEAD pointing at a ref that is gone. */
+    if (cached !== '' && cached !== 'HEAD') {
+      const exists = await this.run(root, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${cached}`], {
+        signal,
+        acceptCodes: [0, 1, 128],
+      });
+      if (exists.exitCode === 0) return cached;
+    }
+
+    /* A probe that times out or cannot start is a failed probe, not a failed
+       pull request read: the composer still has a usable base to fall back to. */
+    let remote = { exitCode: 1, stdout: '', stderr: '' };
+    if (this.mayProbeRemoteDefault(root)) {
+      try {
+        remote = await this.run(root, ['ls-remote', '--symref', 'origin', 'HEAD'], {
+          signal,
+          timeoutMs: REMOTE_DEFAULT_TIMEOUT_MS,
+          acceptCodes: [0, 1, 2, 128],
+        });
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        if (error?.code !== 'git-control/timeout' && error?.code !== 'git-control/spawn-failed') throw error;
+      }
+    }
+    const match = remote.exitCode === 0 ? /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/mu.exec(remote.stdout) : null;
+    const resolved = match === null ? '' : match[1];
+    if (resolved !== '') {
+      this.remoteDefaultFailures.delete(root);
+      /* Write the answer back the way `git remote set-head --auto` would, so the
+         next read is local and the checkout heals itself. */
+      await this.run(root, ['symbolic-ref', 'refs/remotes/origin/HEAD', `refs/remotes/origin/${resolved}`], {
+        signal,
+        acceptCodes: [0, 1, 128],
+      });
+      return resolved;
+    }
+    this.remoteDefaultFailures.set(root, Date.now());
+
+    /* Offline fallback: a branch created from a remote ref records it, which is
+       the same origin the default branch would hand a new branch. */
+    return this.branchOrigin(root, head, signal);
+  }
+
+  /**
+   * Whether the remote's default branch should be probed again: a failed probe
+   * is retried only after {@link REMOTE_DEFAULT_RETRY_MS}.
+   * @param root - repository root.
+   * @returns true when a probe may run.
+   */
+  mayProbeRemoteDefault(root) {
+    const failedAt = this.remoteDefaultFailures.get(root);
+    if (failedAt === undefined) return true;
+    if (Date.now() - failedAt < REMOTE_DEFAULT_RETRY_MS) return false;
+    this.remoteDefaultFailures.delete(root);
+    return true;
+  }
+
+  /**
+   * Read the remote branch a local branch was created from.
+   * @param root - repository root.
+   * @param head - the branch to inspect.
+   * @param signal - caller cancellation.
+   * @returns the origin branch name, or an empty string.
+   */
+  async branchOrigin(root, head, signal) {
+    if (head === null) return '';
+    const result = await this.run(root, ['reflog', 'show', '--format=%gs', '--max-count=20', `refs/heads/${head}`], {
+      signal,
+      acceptCodes: [0, 1, 128],
+    });
+    if (result.exitCode !== 0) return '';
+    for (const line of result.stdout.split('\n')) {
+      const match = /^branch: Created from origin\/(\S+)$/u.exec(line.trim());
+      if (match !== null) return match[1];
+    }
+    return '';
+  }
+
+  /**
    * List the branch a pull request may target, the remote's default first.
    * @param root - repository root.
    * @param head - the branch the pull request comes from, left out.
@@ -1104,11 +1213,10 @@ class GitControl {
    * @returns `{ base, bases }`.
    */
   async baseBranches(root, head, signal) {
-    const [remoteHead, refs] = await Promise.all([
-      this.run(root, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], { signal, acceptCodes: [0, 1, 128] }),
+    const [remoteDefault, refs] = await Promise.all([
+      this.remoteDefaultBranch(root, head, signal),
       this.run(root, ['for-each-ref', '--format=%(refname:short)', 'refs/heads', 'refs/remotes'], { signal }),
     ]);
-    const remoteDefault = remoteHead.exitCode === 0 ? remoteHead.stdout.trim().replace(/^origin\//, '') : '';
     const available = new Set();
     for (const ref of refs.stdout.split('\n').map((entry) => entry.trim())) {
       if (ref === '' || ref === 'origin' || ref.endsWith('/HEAD')) continue;
@@ -1116,7 +1224,11 @@ class GitControl {
       if (name !== '' && name !== head) available.add(name);
     }
     const bases = [];
-    for (const name of [remoteDefault, ...BASE_BRANCH_ORDER]) {
+    /* The resolved default is offered even when it was never fetched locally:
+       `gh pr create --base` resolves the ref on GitHub, so a shallow or partial
+       fetch must not push the picker back onto a guessed branch name. */
+    if (remoteDefault !== '' && remoteDefault !== head) bases.push(remoteDefault);
+    for (const name of BASE_BRANCH_ORDER) {
       if (name !== '' && available.has(name) && !bases.includes(name)) bases.push(name);
     }
     for (const name of [...available].sort()) {

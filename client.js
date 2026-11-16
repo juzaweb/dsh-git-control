@@ -709,6 +709,8 @@ window.__ModuleLoader__.load({
       const prTitleEditedRef = React.useRef(false);
       const [prBody, setPrBody] = React.useState('');
       const [prBase, setPrBase] = React.useState('');
+      /* Whether the author picked a base themselves, so a re-read never overwrites it. */
+      const prBaseEditedRef = React.useRef(false);
       const [prBusy, setPrBusy] = React.useState(false);
       const [prResult, setPrResult] = React.useState(null);
       const [prReload, setPrReload] = React.useState(0);
@@ -857,6 +859,7 @@ window.__ModuleLoader__.load({
       /* Switching branches starts a new pull request: clear the composer. */
       React.useEffect(() => {
         prTitleEditedRef.current = false;
+        prBaseEditedRef.current = false;
         setPrTitle('');
         setPrBody('');
         setPrBase('');
@@ -881,7 +884,10 @@ window.__ModuleLoader__.load({
           .then((data) => {
             if (controller.signal.aborted) return;
             setPrInfo({ phase: 'ready', data, failure: null });
-            setPrBase((current) => (current === '' && typeof data?.base === 'string' ? data.base : current));
+            setPrBase((current) => {
+              if (prBaseEditedRef.current) return current;
+              return typeof data?.base === 'string' && data.base !== '' ? data.base : current;
+            });
           })
           .catch((err) => {
             if (controller.signal.aborted) return;
@@ -1281,10 +1287,15 @@ window.__ModuleLoader__.load({
         const existingUrl = typeof prResult?.url === 'string'
           ? prResult.url
           : (typeof info?.existing?.url === 'string' ? info.existing.url : null);
-        const base = prBase !== ''
+        const bases = Array.isArray(info?.bases) ? info.bases : [];
+        const requested = prBase !== ''
           ? prBase
           : (typeof info?.base === 'string' ? info.base : '');
-        const bases = Array.isArray(info?.bases) ? info.bases : [];
+        /* A remembered branch can disappear, so the picker only offers a name it
+           actually lists; anything else falls back to the resolved default. */
+        const base = bases.length === 0 || bases.includes(requested)
+          ? requested
+          : (typeof info?.base === 'string' && bases.includes(info.base) ? info.base : bases[0]);
         const canSubmit = !prBusy && prTitle.trim() !== '' && base !== '';
 
         const body = existingUrl !== null
@@ -1355,7 +1366,10 @@ window.__ModuleLoader__.load({
                               value: base,
                               'aria-label': t('pr.baseLabel'),
                               disabled: prBusy,
-                              onChange: (event) => setPrBase(event.target.value),
+                              onChange: (event) => {
+                                prBaseEditedRef.current = true;
+                                setPrBase(event.target.value);
+                              },
                             },
                             bases.map((name) => h('option', { key: name, value: name }, name)),
                           ),

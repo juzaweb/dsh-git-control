@@ -57,6 +57,15 @@ The commit card is shaped by the repository state:
 Once the branch is clean, fully pushed, and is not `main`, `master`, or
 `develop`, the commit card adds a **pull request** composer: a title, an optional
 description, and a base-branch picker seeded with the remote's default branch.
+The default is resolved from the remote, not guessed from a branch name: the
+cached `refs/remotes/origin/HEAD` is used while the branch it names still exists,
+and otherwise `git ls-remote --symref origin HEAD` asks the remote and writes the
+answer back. When the remote is unreachable — or that probe just failed, which
+is remembered for a minute so a refresh does not wait on it again — the branch
+the head was created from supplies the default, and only a branch with no
+recorded origin falls back to the conventional `main`, `master`, `develop` order.
+A picker whose remembered choice no longer exists falls back to that default, so
+the select never renders blank.
 The title is filled in on its own: the newest commit subject the branch carries
 over the base, or a readable form of the branch name when it has none. It stays
 editable, and typing in it stops the panel from writing over it.
