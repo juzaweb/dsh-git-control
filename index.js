@@ -7,6 +7,7 @@
  * operations to the Client panel.
  */
 
+import { realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 
 /** Ceiling for a local git read or write. */
@@ -1355,9 +1356,71 @@ class GitControl {
   }
 
   /**
+   * Remove one linked worktree from disk, whatever state it is in.
+   *
+   * `git worktree remove` refuses a checkout that holds uncommitted work, an
+   * ignored file, a nested repository, or a registration whose `.git` file went
+   * missing; each refusal leaves the directory behind. This runs the strongest
+   * form git offers first, then deletes the directory itself and prunes the
+   * stale registration, so the caller always ends with the path gone.
+   * @param main - main checkout the removal is run from.
+   * @param target - absolute path of the linked worktree to delete.
+   * @param signal - caller cancellation.
+   * @returns the trimmed stderr of the git removal attempt, for the summary.
+   */
+  async removeWorktreeCheckout(main, target, signal) {
+    /* Both sides are compared by their canonical path, because a symlink on
+       either one would otherwise hide the containment the guard checks. */
+    const canonical = async (value) => {
+      try {
+        return await realpath(value);
+      } catch {
+        return path.resolve(value);
+      }
+    };
+    const [canonicalMain, canonicalTarget] = await Promise.all([canonical(main), canonical(target)]);
+    const comparable = (value) => value.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase();
+    /* A registration is data read back from `.git`, so it is never trusted as a
+       deletion target on its own: the main checkout, one of its ancestors, and
+       the filesystem root all stay off limits. */
+    if (
+      comparable(canonicalTarget) === comparable(canonicalMain)
+      || comparable(canonicalMain).startsWith(`${comparable(canonicalTarget)}/`)
+      || path.parse(canonicalTarget).root === canonicalTarget
+    ) {
+      throw gitFailure(
+        'git-control/unsafe-target',
+        `${target} contains the main checkout, so it is not removed as a worktree.`,
+      );
+    }
+
+    const removal = await this.run(main, ['worktree', 'remove', '--force', '--force', '--', target], {
+      signal,
+      acceptCodes: [0, 1, 128],
+    });
+    const stderr = firstLine(removal.stderr);
+    if (removal.exitCode === 0) return stderr;
+
+    /* git declined: drop whatever it left behind, then forget the registration.
+       `prune` only removes entries whose directory is already gone. */
+    if (await this.ctx.fs.lstat(target, {}, signal) !== undefined) {
+      await rm(target, { recursive: true, force: true, maxRetries: 3 });
+    }
+    await this.run(main, ['worktree', 'prune'], { signal, acceptCodes: [0, 128] });
+
+    if (await this.ctx.fs.lstat(target, {}, signal) !== undefined) {
+      throw gitFailure(
+        'git-control/remove-failed',
+        `${target} could not be deleted.${stderr === '' ? '' : ` ${stderr}`}`,
+      );
+    }
+    return stderr;
+  }
+
+  /**
    * Move the Session to the main checkout, then remove the linked worktree it
-   * was running in. The checkout must be clean: git refuses to remove one that
-   * holds uncommitted work, and that refusal is reported before anything moves.
+   * was running in — directory included. Uncommitted work inside that checkout
+   * is discarded: the panel asks before calling this.
    * @param input - `{ path, sessionId }`.
    * @param signal - caller cancellation.
    * @returns a one-line summary and the main checkout the Session moved to.
@@ -1369,13 +1432,6 @@ class GitControl {
       throw gitFailure(
         'git-control/not-a-worktree',
         'This directory is the main checkout, so there is no linked worktree to remove.',
-      );
-    }
-    const status = await this.status({ path: root }, signal);
-    if (status.files.length > 0) {
-      throw gitFailure(
-        'git-control/dirty',
-        'Commit or discard the working changes in this worktree before removing it.',
       );
     }
 
@@ -1396,12 +1452,10 @@ class GitControl {
       );
     }
 
-    /* Move the Session first, then remove: the status check above already
-       excluded the refusal git gives for uncommitted work, and this order never
-       leaves the Session pointing at a directory that is already gone. A failed
-       removal leaves the worktree registered in a workable state. */
+    /* Move the Session first, then remove: this order never leaves the Session
+       pointing at a directory that is already gone. */
     await workingDirectory.set(agent, worktree.main, signal);
-    await this.run(worktree.main, ['worktree', 'remove', worktree.current], { signal });
+    await this.removeWorktreeCheckout(worktree.main, worktree.current, signal);
 
     return {
       message: `Removed the worktree at ${worktree.current}.`,

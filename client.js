@@ -216,7 +216,10 @@ window.__ModuleLoader__.load({
       'pr.mergedHintMain': 'This directory is the main checkout: switch it to the base branch to continue there.',
       'pr.mergedLink': 'Open pull request',
       'wt.delete': 'Delete worktree',
-      'wt.deleteHint': 'Move the session to {main} and remove {path}',
+      'wt.deleteHint': 'Move the session to {main} and delete {path} from disk',
+      'wt.deleteConfirm': 'Delete the worktree at {path}? The session moves to the main checkout and the directory is removed from disk.',
+      'wt.deleteDirtyConfirm': 'Delete the worktree at {path}? It still has uncommitted changes, and deleting it discards them permanently.',
+      'wt.deleteDirtyHint': 'This worktree still has uncommitted changes: deleting it discards them.',
       'base.checkout': 'Switch to {base}',
       'base.checkoutHint': 'Check out {base} and fast-forward it to the remote',
       'notice.failed': 'The git command failed.',
@@ -1131,6 +1134,23 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /**
+       * Ask before deleting the worktree, which discards anything uncommitted
+       * in it along with the directory itself.
+       */
+      const askDeleteWorktree = () => ask({
+        title: t('wt.delete'),
+        description: status !== null && status.files.length > 0
+          ? t('wt.deleteDirtyConfirm', { path: worktree.current })
+          : t('wt.deleteConfirm', { path: worktree.current }),
+        command: `git worktree remove --force --force -- ${worktree.current}`,
+        destructive: true,
+        onConfirm: () => {
+          setConfirm(null);
+          void deleteWorktree();
+        },
+      });
+
       /** Switch to the merged pull request's base branch and fast-forward it. */
       const checkoutBase = async (base) => {
         setPrBusy(true);
@@ -1418,13 +1438,18 @@ window.__ModuleLoader__.load({
        * Render what follows a merged pull request: the merged facts, the base
        * branch the work landed in, and the two ways out of the branch — remove
        * the worktree this session runs in, or switch the checkout to the base.
+       * Removing the worktree is offered even with uncommitted changes, because
+       * it discards that checkout entirely; switching is not, since git refuses
+       * a dirty checkout.
        * @returns the merged card, or null when the branch has no merged request.
        */
       const renderMerged = () => {
-        if (!mergedOpen || mergedPr === null || status === null || status.files.length > 0) return null;
+        if (!mergedOpen || mergedPr === null || status === null) return null;
+        const dirty = status.files.length > 0;
         const base = typeof mergedPr.base === 'string' && mergedPr.base !== '' ? mergedPr.base : '';
         const inWorktree = worktree !== null && worktree.isLinked === true;
-        const canCheckout = !inWorktree && base !== '' && base !== prBranch && !status.detached;
+        const canCheckout = !inWorktree && !dirty && base !== '' && base !== prBranch && !status.detached;
+        if (!inWorktree && !canCheckout) return null;
 
         return h(
           'div',
@@ -1450,6 +1475,7 @@ window.__ModuleLoader__.load({
               : t('pr.mergedSubtitle', { branch: prBranch, base }),
           ),
           h('p', { className: 'gctl-hint' }, inWorktree ? t('pr.mergedHint') : t('pr.mergedHintMain')),
+          inWorktree && dirty ? h('p', { className: 'gctl-hint' }, t('wt.deleteDirtyHint')) : null,
           inWorktree || canCheckout
             ? h(
                 'div',
@@ -1462,7 +1488,7 @@ window.__ModuleLoader__.load({
                         className: 'gctl-mainActionButton gctl-dangerSolid',
                         title: t('wt.deleteHint', { main: worktree.main, path: worktree.current }),
                         disabled: prBusy,
-                        onClick: () => void deleteWorktree(),
+                        onClick: () => askDeleteWorktree(),
                       },
                       h(Glyph, { name: 'trash', size: 14 }),
                       h('span', null, prBusy ? t('working') : t('wt.delete')),

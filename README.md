@@ -75,14 +75,20 @@ request, plus the two ways out of the merged branch:
 
 | Control | Shown when | What it runs |
 | --- | --- | --- |
-| **Delete worktree** | the session runs in a linked worktree, and that checkout is clean | `ctx.workingDirectory.set` to the main checkout, then `git worktree remove <checkout>` |
+| **Delete worktree** | the session runs in a linked worktree | `ctx.workingDirectory.set` to the main checkout, then `git worktree remove --force --force -- <checkout>`, falling back to deleting the directory and `git worktree prune` when git still refuses |
 | **Switch to \<base\>** | the session runs in the main checkout, the tree is clean, and the base branch exists locally or on `origin` | `git checkout <base>` (tracking `origin/<base>` when no local branch exists) and `git pull --ff-only` |
 
-A dirty checkout hides the merged card's actions rather than offering a button git
-would refuse. The removal is never forced: the Host checks `git status` first, so
-neither a lock nor an uncommitted file is discarded. The merged state is reread on
-a slow timer (45 s) while the panel is visible, because a merge happens outside
-this workspace.
+Deleting a worktree removes its directory from disk. The panel asks first, and the
+confirmation says so when the checkout still holds uncommitted changes: those are
+discarded along with the directory. The Host runs the strongest form git offers
+(`--force` twice, which also overrides a lock), and when git still declines — a
+registration whose `.git` file went missing, for example — it deletes the directory
+itself and prunes the registration, so no worktree directory survives the action.
+The registration is data read back from `.git`, so the main checkout, one of its
+ancestors, and the filesystem root are refused as deletion targets. A dirty main
+checkout still hides **Switch to \<base\>**, because git would refuse that checkout.
+The merged state is reread on a slow timer (45 s) while the panel is visible,
+because a merge happens outside this workspace.
 
 The composer needs the GitHub CLI on the Host. A missing `gh` is named in the
 card, and an installed but signed-out CLI asks for `gh auth login`.
