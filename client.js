@@ -1,15 +1,16 @@
 /**
  * Client half of the Git Control bundle.
  *
- * Registers the sidebar panel entry and the centre panel that render one
- * repository's changes, branches, history, and stashes, and drives every
- * operation through the Host route `ctx.connection.fetch` serves.
+ * Registers the right-Sidebar tab that renders one repository's changes,
+ * branches, history, and stashes, and drives every operation through the Host
+ * route `ctx.connection.fetch` serves.
  */
 
 window.__ModuleLoader__.load({
   id: '@local/dsh-git-control',
   factory(require) {
     const React = require('react');
+    const { createPortal } = require('react-dom');
     const h = React.createElement;
 
     /** Locale namespace owned by this panel. */
@@ -33,6 +34,8 @@ window.__ModuleLoader__.load({
     const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
     /** Panel states kept across tab switches and panel remounts, per repository. */
     const PANEL_CACHE = new Map();
+    /** Elements the confirmation dialog cycles Tab through. */
+    const FOCUSABLE = 'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex="-1"])';
     /** How many repositories keep a cached panel state. */
     const PANEL_CACHE_LIMIT = 8;
 
@@ -87,7 +90,6 @@ window.__ModuleLoader__.load({
       refreshHint: 'Re-read the repository state',
       repository: 'Repository',
       'repository.none': 'Open a workspace to select a repository.',
-      'repository.empty': 'No workspace is available yet.',
       loading: 'Reading the repository…',
       'branch.detached': 'Detached HEAD',
       'branch.noUpstream': 'No upstream',
@@ -109,13 +111,10 @@ window.__ModuleLoader__.load({
       'commit.placeholder': 'Message',
       'commit.stageAll': 'Stage All',
       'commit.generate': 'Generate commit message',
-      'commit.generated': 'Message written from the current diff.',
-      'commit.action': 'Commit staged changes',
       'action.stage': 'Stage',
       'action.unstage': 'Unstage',
       'action.diff': 'Diff',
       'action.view': 'View',
-      'action.viewAll': 'View all',
       'action.discard': 'Discard',
       'action.close': 'Close',
       'diff.staged': 'Staged diff',
@@ -425,12 +424,46 @@ window.__ModuleLoader__.load({
      */
     function ConfirmDialog({ t, request, onCancel }) {
       const [mode, setMode] = React.useState(request.modes === undefined ? null : request.modes[0].value);
+      const dialogRef = React.useRef(null);
+      const cancelRef = React.useRef(null);
 
+      /*
+       * Focus starts on Cancel rather than on Run. These dialogs execute real
+       * destructive git commands, so a stray Enter must not confirm one; the
+       * previously focused element is restored on close, which keeps a keyboard
+       * user's place in the list behind the scrim.
+       */
+      React.useEffect(() => {
+        const restore = document.activeElement;
+        if (cancelRef.current !== null) cancelRef.current.focus();
+        return () => {
+          if (restore !== null && typeof restore.focus === 'function' && restore.isConnected === true) restore.focus();
+        };
+      }, []);
+
+      /* Escape cancels; Tab cycles inside the dialog so the page behind stays inert. */
       React.useEffect(() => {
         const onKeyDown = (event) => {
           if (event.key === 'Escape') {
             event.preventDefault();
             onCancel();
+            return;
+          }
+          if (event.key !== 'Tab' || dialogRef.current === null) return;
+          const focusable = [...dialogRef.current.querySelectorAll(FOCUSABLE)]
+            .filter((node) => node.offsetParent !== null || node === document.activeElement);
+          if (focusable.length === 0) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          } else if (!dialogRef.current.contains(document.activeElement)) {
+            event.preventDefault();
+            first.focus();
           }
         };
         window.addEventListener('keydown', onKeyDown);
@@ -441,12 +474,12 @@ window.__ModuleLoader__.load({
         ? request.commandFor(mode)
         : request.command;
 
-      return h(
+      const dialog = h(
         'div',
         { className: 'gctl-scrim', role: 'presentation', onClick: (event) => { if (event.target === event.currentTarget) onCancel(); } },
         h(
           'div',
-          { className: 'gctl-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': request.title },
+          { className: 'gctl-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': request.title, ref: dialogRef },
           h('h2', { className: 'gctl-dialogTitle' }, request.title),
           request.description === undefined ? null : h('p', { className: 'gctl-dialogText' }, request.description),
           request.modes === undefined
@@ -473,13 +506,12 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'gctl-dialogActions' },
-            h('button', { type: 'button', className: 'gctl-button', onClick: onCancel }, t('confirm.cancel')),
+            h('button', { type: 'button', className: 'gctl-button', ref: cancelRef, onClick: onCancel }, t('confirm.cancel')),
             h(
               'button',
               {
                 type: 'button',
                 className: request.destructive === true ? 'gctl-button gctl-dangerSolid' : 'gctl-button gctl-primary',
-                autoFocus: true,
                 onClick: () => { request.onConfirm(mode); },
               },
               t('confirm.run'),
@@ -487,6 +519,15 @@ window.__ModuleLoader__.load({
           ),
         ),
       );
+
+      /*
+       * The scrim is portalled to the body. The right Sidebar panel is moved with
+       * a transform, and a transformed ancestor becomes the containing block for
+       * `position: fixed`, so an in-place scrim would cover only the panel rather
+       * than the window it is meant to block.
+       */
+      const host = typeof document === 'undefined' ? null : document.body;
+      return host === null ? dialog : createPortal(dialog, host);
     }
 
     /**
@@ -619,47 +660,64 @@ window.__ModuleLoader__.load({
 
     /**
      * Derive the status badge code, semantic tone, and label from git status facts.
+     *
+     * The tone token names match the aliases the theme actually defines. The
+     * warning state has no `state-warning-primary` alias; its readable text
+     * token is `state-warn-label`, so using that name is what keeps a modified
+     * or renamed path coloured instead of falling back to a hard-coded amber
+     * that is nearly invisible on a light background.
      * @param file - status entry for one path.
      * @returns `{ code, tone, color, label }`.
      */
     function getFileStatusInfo(file) {
       if (file.conflicted) {
-        return { code: 'C', tone: 'bad', color: 'var(--dsw-alias-state-error-primary, #f85149)', label: 'Conflicted' };
+        return { code: 'C', tone: 'bad', color: 'var(--dsw-alias-state-error-primary)', label: 'Conflicted' };
       }
       if (file.untracked) {
-        return { code: 'U', tone: 'ok', color: 'var(--dsw-alias-state-success-primary, #3fb950)', label: 'Untracked' };
+        return { code: 'U', tone: 'ok', color: 'var(--dsw-alias-state-success-primary)', label: 'Untracked' };
       }
       const code = file.code || '';
       if (code.includes('A')) {
-        return { code: 'A', tone: 'ok', color: 'var(--dsw-alias-state-success-primary, #3fb950)', label: 'Added' };
+        return { code: 'A', tone: 'ok', color: 'var(--dsw-alias-state-success-primary)', label: 'Added' };
       }
       if (code.includes('D')) {
-        return { code: 'D', tone: 'bad', color: 'var(--dsw-alias-state-error-primary, #f85149)', label: 'Deleted' };
+        return { code: 'D', tone: 'bad', color: 'var(--dsw-alias-state-error-primary)', label: 'Deleted' };
       }
       if (code.includes('R')) {
-        return { code: 'R', tone: 'warn', color: 'var(--dsw-alias-state-warning-primary, #e3b341)', label: 'Renamed' };
+        return { code: 'R', tone: 'warn', color: 'var(--dsw-alias-state-warn-label)', label: 'Renamed' };
       }
-      return { code: 'M', tone: 'warn', color: 'var(--dsw-alias-state-warning-primary, #e3b341)', label: 'Modified' };
+      return { code: 'M', tone: 'warn', color: 'var(--dsw-alias-state-warn-label)', label: 'Modified' };
     }
 
     /**
      * Render one icon-only command. The label survives in `aria-label` and in
      * the hover hint, so dropping the visible text keeps the control named.
+     *
+     * A `blocked` control is the soft form of disabled: it stays focusable and
+     * reachable, exposes `aria-disabled` instead of the `disabled` attribute,
+     * and folds its reason into the accessible name. That matters for the sync
+     * controls, whose eligibility changes with the remote: a natively disabled
+     * button hides its `title` hint and drops out of the tab order, so the
+     * reason it cannot run would reach neither pointer nor keyboard users.
+     * `disabled` stays the hard form, for work that is already in flight.
      * @param props - glyph, label, hint, optional counter badge, and state.
      * @returns the button element.
      */
     function IconButton(props) {
-      const { name, label, hint = null, badge = null, onClick, disabled = false, danger = false, busy = false, size = 16 } = props;
+      const { name, label, hint = null, badge = null, onClick, disabled = false, blocked = false, danger = false, busy = false, size = 16 } = props;
+      const softBlocked = blocked && !disabled && !busy;
+      const description = hint === null ? label : `${label} — ${hint}`;
       return h(
         'button',
         {
           type: 'button',
-          className: danger ? 'gctl-iconButton gctl-iconDanger' : 'gctl-iconButton',
-          title: hint === null ? label : `${label} — ${hint}`,
-          'aria-label': label,
+          className: `${danger ? 'gctl-iconButton gctl-iconDanger' : 'gctl-iconButton'}${softBlocked ? ' gctl-iconButtonBlocked' : ''}`,
+          title: description,
+          'aria-label': softBlocked ? description : label,
           'aria-busy': busy ? 'true' : undefined,
-          disabled,
-          onClick,
+          'aria-disabled': softBlocked ? 'true' : undefined,
+          disabled: softBlocked ? undefined : disabled,
+          onClick: softBlocked ? undefined : onClick,
         },
         h(Glyph, { name, size }),
         badge === null ? null : h('span', { className: 'gctl-badge', 'aria-hidden': 'true' }, badge),
@@ -673,7 +731,7 @@ window.__ModuleLoader__.load({
      * @returns the panel element.
      */
     function GitControlPage(props) {
-      const { t, useWorkspaces, fixedPath, compact = false, sessionId = null } = props;
+      const { t, useWorkspaces, fixedPath, sessionId = null } = props;
       const workspaces = useWorkspaces === undefined
         ? []
         : useWorkspaces((snapshot) => snapshot.items);
@@ -1177,10 +1235,22 @@ window.__ModuleLoader__.load({
                 : t('sync.pushNoneHint')
       );
 
-      /** Visible warning when the branch cannot be pushed before pulling. */
-      const syncHint = status !== null && !detached && behind > 0
-        ? t('sync.pullFirstHint', { count: behind })
-        : null;
+      /**
+       * The one line that explains a sync control the branch cannot run yet.
+       *
+       * Push and pull are the controls a user is most likely to press while
+       * they are ineligible, so the reason is printed next to them rather than
+       * left in a `title` that never opens on a nudge or from the keyboard. A
+       * detached head is named because both controls are blocked there, and a
+       * branch that is behind says why push is refused instead of letting git
+       * reject it.
+       */
+      const syncHint = status === null ? null
+        : detached ? t('sync.detached')
+          : behind > 0 ? t('sync.pullFirstHint', { count: behind })
+            : canPush || canPull ? null
+              : unpublished && status.upstreamGone ? t('branch.upstreamGone')
+                : null;
 
       /** Push or publish the current branch to the remote. */
       const push = () => void execute({ action: 'push', path: chosenPath });
@@ -1556,7 +1626,6 @@ window.__ModuleLoader__.load({
                 disabled: busy,
                 onClick: () => action.run(),
               })),
-              h('span', { className: 'gctl-viewAll' }, t('action.viewAll')),
             ),
           ),
           isCollapsed
@@ -1565,36 +1634,47 @@ window.__ModuleLoader__.load({
                 const statusInfo = getFileStatusInfo(file);
                 const { name: fileName, dir: fileDir } = splitFilePath(file.path);
                 const originalSplit = file.originalPath ? splitFilePath(file.originalPath) : null;
+                const shownName = originalSplit ? `${originalSplit.name} → ${fileName}` : fileName;
                 return h(
                   'li',
                   {
                     className: selected?.path === file.path ? 'gctl-row gctl-rowActive' : 'gctl-row',
                     key: `${file.code}:${file.path}`,
-                    onClick: () => setSelected({
-                      path: file.path,
-                      staged: file.staged === true,
-                      untracked: file.untracked === true,
-                      conflicted: file.conflicted === true,
-                      originalPath: file.originalPath ?? null,
-                    }),
                   },
-                  h('span', {
-                    className: 'gctl-fileIcon',
-                    style: { color: statusInfo.color },
-                    title: `${statusInfo.label} (${statusInfo.code})`,
-                  }, h(Glyph, { name: 'file', size: 16 })),
                   h(
-                    'span',
-                    { className: 'gctl-fileDetails', title: file.originalPath ? `${file.originalPath} → ${file.path}` : file.path },
-                    h('span', { className: 'gctl-fileName' }, originalSplit ? `${originalSplit.name} → ${fileName}` : fileName),
-                    fileDir ? h('span', { className: 'gctl-fileDir' }, fileDir) : null,
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'gctl-rowMain',
+                      'aria-label': `${statusInfo.label}: ${file.path}`,
+                      'aria-current': selected?.path === file.path ? 'true' : undefined,
+                      title: file.originalPath ? `${file.originalPath} → ${file.path}` : file.path,
+                      onClick: () => setSelected({
+                        path: file.path,
+                        staged: file.staged === true,
+                        untracked: file.untracked === true,
+                        conflicted: file.conflicted === true,
+                        originalPath: file.originalPath ?? null,
+                      }),
+                    },
+                    h('span', {
+                      className: 'gctl-fileIcon',
+                      style: { color: statusInfo.color },
+                      title: `${statusInfo.label} (${statusInfo.code})`,
+                    }, h(Glyph, { name: 'file', size: 16 })),
+                    h(
+                      'span',
+                      { className: 'gctl-fileDetails' },
+                      h('span', { className: 'gctl-fileName' }, shownName),
+                      fileDir ? h('span', { className: 'gctl-fileDir' }, fileDir) : null,
+                    ),
                   ),
                   h(
                     'span',
                     { className: 'gctl-rowTail' },
                     h(
                       'span',
-                      { className: 'gctl-rowActions', onClick: (e) => e.stopPropagation() },
+                      { className: 'gctl-rowActions' },
                       actions.map((makeAction) => makeAction(file)).map((action) => h(IconButton, {
                         key: action.id,
                         name: action.icon,
@@ -1607,7 +1687,7 @@ window.__ModuleLoader__.load({
                     ),
                     h('span', {
                       className: `gctl-statusTag gctl-statusTag-${statusInfo.tone}`,
-                      style: { color: statusInfo.color },
+                      title: statusInfo.label,
                     }, statusInfo.code),
                   ),
                 );
@@ -1678,25 +1758,54 @@ window.__ModuleLoader__.load({
         paths: stagedFiles.map((f) => f.path),
       });
 
+      /*
+       * The strip follows the ARIA tabs pattern: it owns the arrow keys, each tab
+       * names the single panel through `aria-controls`, and only the selected tab
+       * stays in the tab order so Tab steps past the strip instead of walking
+       * every tab.
+       */
+      const tabIds = ['changes', 'branches', 'history', 'stash'];
+      const selectTab = (id) => {
+        setTab(id);
+        setError(null);
+      };
+      const moveTab = (event, id) => {
+        const index = tabIds.indexOf(id);
+        if (index === -1) return;
+        const next = event.key === 'ArrowRight' ? tabIds[(index + 1) % tabIds.length]
+          : event.key === 'ArrowLeft' ? tabIds[(index - 1 + tabIds.length) % tabIds.length]
+            : event.key === 'Home' ? tabIds[0]
+              : event.key === 'End' ? tabIds[tabIds.length - 1]
+                : null;
+        if (next === null) return;
+        event.preventDefault();
+        selectTab(next);
+        const host = event.currentTarget.parentElement;
+        const target = host === null ? null : host.querySelector(`[data-gctl-tab="${next}"]`);
+        if (target !== null) target.focus();
+      };
+
       const tabButton = (id, label) => h(
         'button',
         {
           key: id,
           type: 'button',
           role: 'tab',
+          id: `gctl-tab-${id}`,
+          'data-gctl-tab': id,
           'aria-selected': tab === id,
+          'aria-controls': 'gctl-tabpanel',
+          tabIndex: tab === id ? 0 : -1,
           className: tab === id ? 'gctl-tab gctl-tabActive' : 'gctl-tab',
-          onClick: () => {
-            setTab(id);
-            setError(null);
-          },
+          onClick: () => selectTab(id),
+          onKeyDown: (event) => moveTab(event, id),
         },
         label,
       );
 
       return h(
         'section',
-        { className: compact ? 'gctl-page gctl-compact' : 'gctl-page' },
+        { className: 'gctl-page gctl-compact' },
         h('style', null, PAGE_CSS),
         h(
           'div',
@@ -1765,9 +1874,7 @@ window.__ModuleLoader__.load({
                     h(
                       'span',
                       { className: 'gctl-branch' },
-                      h('svg', { width: 14, height: 14, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, 'aria-hidden': 'true' },
-                        h('circle', { cx: 7, cy: 6, r: 2.2 }), h('circle', { cx: 7, cy: 18, r: 2.2 }), h('circle', { cx: 17, cy: 8.5, r: 2.2 }),
-                        h('path', { d: 'M7 8.4v7.2' }), h('path', { d: 'M17 10.9c0 3.4-2.6 4.1-6.2 4.6' })),
+                      h(GitControlIcon, { size: 14 }),
                       detached ? t('branch.detached') : status.branch,
                     ),
                     h(
@@ -1792,9 +1899,12 @@ window.__ModuleLoader__.load({
                       h(IconButton, {
                         name: 'pull',
                         label: t('pull'),
-                        hint: canPull ? t('sync.pullHint', { count: behind, upstream: status.upstream }) : t('sync.pullNoneHint'),
+                        hint: detached
+                          ? t('sync.detached')
+                          : canPull ? t('sync.pullHint', { count: behind, upstream: status.upstream }) : t('sync.pullNoneHint'),
                         badge: canPull ? t('state.behind', { count: behind }) : null,
-                        disabled: busy || !canPull,
+                        blocked: !canPull || detached,
+                        disabled: busy,
                         onClick: () => void execute({ action: 'pull', path: chosenPath }),
                       }),
                       h(IconButton, {
@@ -1802,19 +1912,20 @@ window.__ModuleLoader__.load({
                         label: unpublished ? t('sync.publish') : t('push'),
                         hint: pushHint,
                         badge: ahead > 0 ? t('state.ahead', { count: ahead }) : null,
-                        disabled: busy || !canPush,
+                        blocked: !canPush,
+                        disabled: busy,
                         onClick: push,
                       }),
                     ),
                   ),
-                  syncHint === null ? null : h('p', { className: 'gctl-hint gctl-hintBad' }, syncHint),
+                  syncHint === null ? null : h('p', { className: 'gctl-syncHint' }, syncHint),
                 ),
 
             status === null
               ? null
               : h(
                   'div',
-                  { className: 'gctl-tabs', role: 'tablist' },
+                  { className: 'gctl-tabs', role: 'tablist', 'aria-label': t('title') },
                   tabButton('changes', t('tab.changes')),
                   tabButton('branches', t('tab.branches')),
                   tabButton('history', t('tab.history')),
@@ -1825,7 +1936,7 @@ window.__ModuleLoader__.load({
               ? null
               : h(
                   'div',
-                  { className: 'gctl-body', role: 'tabpanel' },
+                  { className: 'gctl-body', role: 'tabpanel', id: 'gctl-tabpanel', 'aria-labelledby': `gctl-tab-${tab}`, tabIndex: -1 },
                   tab === 'changes'
                     ? h(
                         'div',
@@ -2290,24 +2401,24 @@ window.__ModuleLoader__.load({
 
     /** Panel stylesheet, injected by the page element so unmounting removes it. */
     const PAGE_CSS = `
-.gctl-page{width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-size:14px;line-height:1.6;display:flex;overflow:hidden}
+.gctl-page{container-type:inline-size;--gctl-surface:color-mix(in srgb,var(--dsw-alias-label-primary) 4%,var(--dsw-alias-bg-base));--gctl-surface-hover:var(--dsw-alias-interactive-bg-hover);--gctl-surface-active:var(--dsw-alias-interactive-bg-active);--gctl-line:color-mix(in srgb,var(--dsw-alias-label-primary) 45%,transparent);--gctl-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary) 62%,transparent);--gctl-line-soft:color-mix(in srgb,var(--dsw-alias-label-primary) 22%,transparent);width:100%;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-size:14px;line-height:1.6;display:flex;overflow:hidden}
 .gctl-scroll{scrollbar-gutter:stable;flex:1;min-height:0;overflow:auto}
-.gctl-content{max-width:1000px;margin:0 auto;padding:0 clamp(24px,4vw,48px) 56px}
+.gctl-content{max-width:none;margin:0 auto;padding:0 12px 28px}
 .gctl-heading{flex-wrap:wrap;justify-content:space-between;align-items:center;gap:16px;margin-bottom:18px;padding-top:28px;display:flex}
 .gctl-title{flex:0 auto;min-width:0;max-width:100%;align-items:baseline;gap:10px;margin:0;font-size:20px;font-weight:500;line-height:28px;display:flex}
 .gctl-working{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:400}
 .gctl-headingActions{align-items:center;gap:10px;display:flex;flex:none}
 .gctl-picker{align-items:center;gap:8px;display:flex;min-width:0}
 .gctl-pickerLabel{color:var(--dsw-alias-label-secondary);font-size:12px;white-space:nowrap}
-.gctl-select{height:30px;max-width:260px;border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;padding:0 8px}
-.gctl-select:hover{border-color:var(--dsw-alias-border-l1)}
-.gctl-button{height:30px;border:.5px solid var(--dsw-alias-border-l2);border-radius:15px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer;align-items:center;gap:6px;padding:0 12px;display:inline-flex;white-space:nowrap}
-.gctl-button:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2)}
-.gctl-button:disabled{color:var(--dsw-alias-state-idle-primary);cursor:default}
+.gctl-select{height:30px;max-width:260px;border:.5px solid var(--gctl-line);border-radius:8px;background:var(--gctl-surface);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;padding:0 8px}
+.gctl-select:hover{border-color:var(--gctl-line-strong)}
+.gctl-button{height:30px;border:.5px solid var(--gctl-line);border-radius:15px;background:var(--gctl-surface);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer;align-items:center;gap:6px;padding:0 12px;display:inline-flex;white-space:nowrap}
+.gctl-button:hover:not(:disabled){background:var(--gctl-surface-active)}
+.gctl-button:disabled{color:var(--dsw-alias-label-tertiary);cursor:not-allowed}
 .gctl-button:focus-visible,.gctl-tab:focus-visible,.gctl-input:focus-visible,.gctl-textarea:focus-visible,.gctl-select:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .gctl-primary{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
 .gctl-dangerSolid{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
-.gctl-notice{border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);margin-bottom:16px;padding:10px 12px;font-size:13px}
+.gctl-notice{border:.5px solid var(--gctl-line);border-radius:10px;background:var(--gctl-surface);color:var(--dsw-alias-label-primary);margin-bottom:16px;padding:10px 12px;font-size:13px}
 .gctl-noticeError{border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary)}
 .gctl-inputError{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.4;margin:6px 0;overflow-wrap:anywhere}
 .gctl-inputError .gctl-command{margin-top:4px;font-size:11px;opacity:.85}
@@ -2328,25 +2439,28 @@ window.__ModuleLoader__.load({
 .gctl-tabActive{border-bottom-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary)}
 .gctl-body{min-height:0;padding-bottom:8px}
 .gctl-hint{color:var(--dsw-alias-label-secondary);margin:10px 0;font-size:13px}
-.gctl-commit{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);margin-bottom:18px;padding:12px}
+.gctl-commit{box-sizing:border-box;border:.5px solid var(--gctl-line);border-radius:12px;background:var(--gctl-surface);margin-bottom:18px;padding:12px}
 .gctl-commitIdle{background:var(--dsw-alias-bg-base)}
 .gctl-commitTools{margin-bottom:8px;justify-content:space-between;align-items:flex-start;gap:10px;display:flex}
 .gctl-commitTools .gctl-hint{margin:0}
 .gctl-chips{flex-wrap:wrap;align-items:center;gap:6px;display:flex;min-width:0}
-.gctl-chip{border-radius:9px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);white-space:nowrap;padding:0 7px;font-size:11px;line-height:18px}
+.gctl-chip{border-radius:9px;background:var(--gctl-surface-active);color:var(--dsw-alias-label-secondary);white-space:nowrap;padding:0 7px;font-size:11px;line-height:18px}
 .gctl-chipOk{color:var(--dsw-alias-state-success-primary)}
 .gctl-chipBad{color:var(--dsw-alias-state-error-primary)}
 .gctl-hintBad{color:var(--dsw-alias-state-error-primary)}
 .gctl-toolGroup{flex:none;align-items:center;gap:4px;display:inline-flex}
-.gctl-iconButton{border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-base);min-width:28px;height:26px;color:var(--dsw-alias-label-secondary);cursor:pointer;justify-content:center;align-items:center;gap:2px;padding:0 4px;display:inline-flex}
-.gctl-iconButton:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary)}
-.gctl-iconButton:disabled{color:var(--dsw-alias-state-idle-primary);cursor:default}
+.gctl-iconButton{border:.5px solid var(--gctl-line);border-radius:8px;background:var(--gctl-surface);min-width:28px;height:26px;color:var(--dsw-alias-label-secondary);cursor:pointer;justify-content:center;align-items:center;gap:2px;padding:0 4px;display:inline-flex;transition:background var(--ds-transition-duration) var(--ds-ease-in-out),color var(--ds-transition-duration) var(--ds-ease-in-out)}
+.gctl-iconButton:hover:not(:disabled){background:var(--gctl-surface-active);color:var(--dsw-alias-label-primary)}
+.gctl-iconButton:disabled{color:var(--dsw-alias-label-tertiary);cursor:not-allowed;opacity:.6}
+.gctl-iconButtonBlocked{color:var(--dsw-alias-label-tertiary);border-color:var(--gctl-line-soft);background:transparent;cursor:not-allowed}
+.gctl-iconButtonBlocked:hover{background:var(--gctl-surface-hover);color:var(--dsw-alias-label-secondary)}
+.gctl-syncHint{color:var(--dsw-alias-label-secondary);margin:6px 0 0;font-size:12px;line-height:1.5}
 .gctl-iconButton:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .gctl-iconButton[aria-busy=true]{color:var(--dsw-alias-brand-primary);animation:gctl-pulse 1.1s var(--ds-ease-in-out) infinite}
 .gctl-iconDanger,.gctl-iconDanger:hover:not(:disabled){color:var(--dsw-alias-state-error-primary)}
-.gctl-badge{color:var(--dsw-alias-brand-primary);font-variant-numeric:tabular-nums;font-size:10px;line-height:1}
+.gctl-badge{color:var(--dsw-alias-brand-primary);font-variant-numeric:tabular-nums;font-size:11px;line-height:1}
 @keyframes gctl-pulse{50%{opacity:.45}}
-.gctl-textarea,.gctl-input{box-sizing:border-box;width:100%;border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;padding:8px 10px;resize:vertical;display:block;transition:border-color .2s ease,box-shadow .2s ease,background .2s ease}
+.gctl-textarea,.gctl-input{box-sizing:border-box;width:100%;border:.5px solid var(--gctl-line);border-radius:10px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;padding:8px 10px;resize:vertical;display:block;transition:border-color .2s ease,box-shadow .2s ease,background .2s ease}
 .gctl-textarea:focus,.gctl-input:focus{border-color:var(--dsw-alias-brand-primary)}
 .gctl-textareaGenerating{border-color:var(--dsw-alias-brand-primary);background:linear-gradient(90deg,var(--dsw-alias-bg-base) 0%,color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,var(--dsw-alias-bg-base)) 50%,var(--dsw-alias-bg-base) 100%);background-size:200% 100%;animation:gctl-shimmer 2s linear infinite,gctl-glow 2s ease-in-out infinite;cursor:progress}
 @keyframes gctl-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
@@ -2355,9 +2469,10 @@ window.__ModuleLoader__.load({
 .gctl-textareaWrap .gctl-textarea{padding-right:38px}
 .gctl-textareaSpark{position:absolute;top:6px;right:6px;z-index:2}
 .gctl-mainActionRow{margin-top:10px;display:flex}
-.gctl-mainActionButton{box-sizing:border-box;width:100%;height:32px;background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);border-radius:8px;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 12px;gap:8px}
-.gctl-mainActionButton:hover:not(:disabled){background:var(--dsw-alias-bg-layer-3)}
-.gctl-mainActionButton:disabled{color:var(--dsw-alias-state-idle-primary);border-color:var(--dsw-alias-border-l2);cursor:default}
+.gctl-mainActionButton{box-sizing:border-box;width:100%;height:32px;background:var(--gctl-surface);border:.5px solid var(--gctl-line);border-radius:8px;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0 12px;gap:8px}
+.gctl-mainActionButton:hover:not(:disabled){background:var(--gctl-surface-active)}
+.gctl-mainActionButton:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.gctl-mainActionButton:disabled{color:var(--dsw-alias-label-tertiary);border-color:var(--gctl-line-soft);cursor:not-allowed;opacity:.6}
 .gctl-mainActionButton.gctl-primary{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
 .gctl-commitHintRow{margin-top:8px;display:flex;align-items:center;justify-content:center;text-align:center}
 .gctl-commitHintRow .gctl-hint{margin:0;font-size:12px}
@@ -2376,27 +2491,29 @@ window.__ModuleLoader__.load({
 .gctl-merged .gctl-mergedTitle{color:var(--dsw-alias-state-success-primary)}
 .gctl-group{margin-bottom:18px}
 .gctl-groupHead{display:flex;align-items:center;justify-content:space-between;padding:4px 6px;margin:8px 0 4px;border-radius:6px;cursor:pointer;user-select:none}
-.gctl-groupHead:hover{background:var(--dsw-alias-bg-layer-1)}
+.gctl-groupHead:hover{background:var(--gctl-surface-hover)}
+.gctl-groupHead:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
 .gctl-groupTitleWrap{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;color:var(--dsw-alias-label-secondary)}
 .gctl-groupChevron{color:var(--dsw-alias-label-secondary);flex:none}
 .gctl-groupTitle{float:none;margin:0}
 .gctl-groupActions{display:inline-flex;align-items:center;gap:2px}
-.gctl-viewAll{font-size:12px;color:var(--dsw-alias-label-secondary);margin-left:4px;cursor:pointer}
-.gctl-viewAll:hover{color:var(--dsw-alias-label-primary)}
-.gctl-count{border-radius:9px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11px;padding:0 6px;line-height:18px}
+.gctl-count{border-radius:9px;background:var(--gctl-surface-active);color:var(--dsw-alias-label-secondary);font-size:11px;padding:0 6px;line-height:18px}
 .gctl-rows{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px}
-.gctl-row{border-radius:8px;align-items:center;gap:8px;padding:5px 8px;display:flex;cursor:pointer}
-.gctl-row:hover{background:var(--dsw-alias-bg-layer-1)}
-.gctl-rowActive{background:var(--dsw-alias-bg-layer-2)}
+.gctl-row{border-radius:8px;align-items:center;gap:8px;padding:5px 8px;display:flex}
+.gctl-row:hover{background:var(--gctl-surface-hover)}
+.gctl-row:focus-within{background:var(--gctl-surface-hover)}
+.gctl-rowActive,.gctl-rowActive:hover{background:var(--gctl-surface-active);box-shadow:inset 2px 0 0 var(--dsw-alias-brand-primary)}
+.gctl-rowMain{flex:1;min-width:0;display:flex;align-items:center;gap:8px;border:0;background:none;color:inherit;font:inherit;text-align:left;padding:0;margin:0;cursor:pointer;border-radius:6px}
+.gctl-rowMain:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .gctl-fileIcon{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .gctl-fileDetails{flex:1;min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden}
 .gctl-fileName{color:var(--dsw-alias-label-primary);font-size:13px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
 .gctl-fileDir{color:var(--dsw-alias-label-secondary);font-size:12px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
 .gctl-rowTail{flex:none;display:flex;align-items:center;gap:8px;margin-left:auto}
-.gctl-statusTag{font-weight:700;font-size:12px;min-width:14px;text-align:right}
-.gctl-statusTag-ok{color:var(--dsw-alias-state-success-primary)}
-.gctl-statusTag-warn{color:var(--dsw-alias-state-warning-primary)}
-.gctl-statusTag-bad{color:var(--dsw-alias-state-error-primary)}
+.gctl-statusTag{font-weight:700;font-size:11px;line-height:16px;min-width:16px;text-align:center;border-radius:5px;padding:0 3px;background:var(--gctl-surface-active);color:var(--dsw-alias-label-primary)}
+.gctl-statusTag-ok{color:var(--dsw-alias-label-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 22%,var(--dsw-alias-bg-base))}
+.gctl-statusTag-warn{color:var(--dsw-alias-label-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 24%,var(--dsw-alias-bg-base))}
+.gctl-statusTag-bad{color:var(--dsw-alias-label-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 22%,var(--dsw-alias-bg-base))}
 .gctl-code{width:22px;flex:none;color:var(--dsw-alias-label-secondary);text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;letter-spacing:-.5px}
 .gctl-codeCurrent{color:var(--dsw-alias-state-success-primary)}
 .gctl-path{flex:1;min-width:0;overflow-wrap:anywhere;font-size:13px}
@@ -2410,7 +2527,7 @@ window.__ModuleLoader__.load({
 .gctl-details{margin-top:14px}
 .gctl-detailsSummary{color:var(--dsw-alias-label-secondary);cursor:pointer;align-items:center;gap:8px;font-size:13px;display:flex}
 .gctl-more{margin-top:14px}
-.gctl-diff{border:.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);margin-top:20px;overflow:hidden}
+.gctl-diff{border:.5px solid var(--gctl-line);border-radius:12px;background:var(--gctl-surface);margin-top:20px;overflow:hidden}
 .gctl-diffHead{border-bottom:.5px solid var(--dsw-alias-border-l2);justify-content:space-between;align-items:center;gap:12px;padding:8px 12px;display:flex}
 .gctl-diffTitle{overflow-wrap:anywhere;font-size:13px}
 .gctl-diffBody{padding:8px 0}
@@ -2421,7 +2538,7 @@ window.__ModuleLoader__.load({
 .gctl-imagePaneHead{border-bottom:.5px solid var(--dsw-alias-border-l2);justify-content:space-between;align-items:baseline;gap:8px;padding:6px 10px;display:flex}
 .gctl-imageLabel{color:var(--dsw-alias-label-secondary);text-transform:uppercase;letter-spacing:.4px;font-size:11px;font-weight:600}
 .gctl-imageMeta{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-variant-numeric:tabular-nums;font-size:11px}
-.gctl-imageFrame{background:repeating-conic-gradient(var(--dsw-alias-bg-layer-1) 0% 25%,var(--dsw-alias-bg-base) 0% 50%) 50%/16px 16px;justify-content:center;align-items:center;min-height:140px;padding:8px;display:flex}
+.gctl-imageFrame{background:repeating-conic-gradient(var(--gctl-surface) 0% 25%,var(--dsw-alias-bg-base) 0% 50%) 50%/16px 16px;justify-content:center;align-items:center;min-height:140px;padding:8px;display:flex}
 .gctl-imageFrameSingle{min-height:180px}
 .gctl-image{object-fit:contain;max-width:100%;max-height:340px;display:block}
 .gctl-imagePane .gctl-hint{margin:0;padding:8px 10px;font-size:12px}
@@ -2435,8 +2552,8 @@ window.__ModuleLoader__.load({
 .gctl-dialogTitle{margin:0;font-size:16px;font-weight:500}
 .gctl-dialogText{color:var(--dsw-alias-label-secondary);margin:8px 0 0;font-size:13px}
 .gctl-modeGroup{flex-direction:column;gap:6px;margin-top:12px;display:flex}
-.gctl-mode{border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;color:var(--dsw-alias-label-secondary);align-items:center;gap:8px;padding:6px 10px;font-size:13px;display:flex;cursor:pointer}
-.gctl-mode:hover{background:var(--dsw-alias-bg-layer-2)}
+.gctl-mode{border:.5px solid var(--gctl-line);border-radius:10px;color:var(--dsw-alias-label-secondary);align-items:center;gap:8px;padding:6px 10px;font-size:13px;display:flex;cursor:pointer}
+.gctl-mode:hover{background:var(--gctl-surface-hover)}
 .gctl-modeActive{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary)}
 .gctl-dialogActions{justify-content:flex-end;gap:10px;margin-top:18px;display:flex}
 .gctl-compact .gctl-content{max-width:none;padding:0 12px 28px}
@@ -2449,12 +2566,11 @@ window.__ModuleLoader__.load({
 .gctl-compact .gctl-tabs{gap:0;margin-bottom:12px;overflow-x:auto}
 .gctl-compact .gctl-tab{padding:6px 8px;font-size:13px;white-space:nowrap}
 .gctl-compact .gctl-row{flex-wrap:wrap;gap:4px;padding:4px 6px}
-.gctl-compact .gctl-rowActions{margin-left:auto}
 .gctl-compact .gctl-path{font-size:12px}
 .gctl-compact .gctl-commit{padding:10px}
-.gctl-compact .gctl-chip{font-size:10px;line-height:16px;padding:0 6px}
-.gctl-compact .gctl-iconButton{min-width:24px;height:22px;padding:0 3px}
-.gctl-compact .gctl-rowActions{gap:0}
+.gctl-compact .gctl-chip{font-size:11px;line-height:16px;padding:0 6px}
+.gctl-compact .gctl-iconButton{min-width:28px;height:26px;padding:0 3px}
+.gctl-compact .gctl-rowActions{margin-left:auto;gap:0}
 .gctl-compact .gctl-mainActionButton{height:28px;font-size:12px;padding:0 8px}
 .gctl-compact .gctl-pr{gap:6px}
 .gctl-compact .gctl-prSubtitle,.gctl-compact .gctl-pr .gctl-hint{font-size:11px}
@@ -2465,7 +2581,23 @@ window.__ModuleLoader__.load({
 .gctl-compact .gctl-textarea{font-size:12px}
 .gctl-compact .gctl-groupTitle{font-size:12px}
 .gctl-compact .gctl-button{height:26px;font-size:12px;padding:0 10px}
-@media (width<=760px){.gctl-content{padding:0 20px 48px}.gctl-headingActions{width:100%;justify-content:space-between}.gctl-select{max-width:100%}.gctl-imagePair{grid-template-columns:1fr}}
+@container (width<=420px){
+  .gctl-headingActions{width:100%;justify-content:space-between}
+  .gctl-select{max-width:100%}
+  .gctl-imagePair{grid-template-columns:1fr}
+  .gctl-content{padding:0 10px 24px}
+}
+@container (width<=340px){
+  .gctl-tabs{overflow-x:auto;scrollbar-width:none}
+  .gctl-branchBar{gap:4px 8px}
+  .gctl-prRow{flex-direction:column;align-items:stretch}
+  .gctl-prRow .gctl-mainActionButton{width:100%}
+}
+@media (prefers-reduced-motion:reduce){
+  .gctl-iconButton[aria-busy=true],.gctl-textareaGenerating{animation:none}
+  .gctl-textareaGenerating{background:var(--dsw-alias-bg-base);border-color:var(--dsw-alias-brand-primary);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--dsw-alias-brand-primary) 35%,transparent)}
+  .gctl-iconButton,.gctl-mainActionButton,.gctl-textarea,.gctl-input,.gctl-select{transition:none}
+}
 `;
 
     /**
@@ -2482,7 +2614,7 @@ window.__ModuleLoader__.load({
      * fallbacks for a Session that has not reported one yet.
      * @param props - slot props: localized copy, the workspace and session
      * selector hooks, the projection reader, and the Session id.
-     * @returns the compact panel, or a hint when no directory is known.
+     * @returns the panel, or a hint when no directory is known.
      */
     function GitRightPane(props) {
       const { t, useWorkspaces, useSessions, useProjection, sessionId } = props;
@@ -2508,7 +2640,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'gctl-content' }, h('p', { className: 'gctl-hint' }, t('view.noDirectory'))),
         );
       }
-      return h(GitControlPage, { t, useWorkspaces, fixedPath: directory, compact: true, sessionId });
+      return h(GitControlPage, { t, useWorkspaces, fixedPath: directory, sessionId });
     }
 
     /**

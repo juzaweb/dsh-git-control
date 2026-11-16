@@ -32,7 +32,38 @@ projection value has landed.
 
 Row actions, the history actions, and the sync controls are **icon-only**: each
 keeps its name in `aria-label`, repeats it in the `title` hint, and stays a full
-hit target. Destructive ones are drawn in the error colour.
+hit target. Destructive ones are drawn in the error colour. A file row itself is
+a real `button`, so a diff opens from the keyboard as well as from a click, and
+its `aria-current` marks the row whose diff is open.
+
+A sync control the branch cannot run yet is *soft-blocked*: it carries
+`aria-disabled`, keeps its place in the tab order, and folds the reason into its
+accessible name, so a keyboard or touch user still learns why Pull or Push is
+unavailable. The reason is also printed as a line under the branch bar rather
+than left in a `title`, which never opens on a nudge. Work already in flight
+still uses the real `disabled` attribute.
+
+The panel paints its surfaces with `color-mix` over the theme's own label and
+background aliases rather than the `bg-layer-*` fills. Those fills collapse to
+the page background in the light theme, which left row hover, row selection, and
+every card boundary invisible there; the mixed surfaces and the 45%-label border
+stay distinguishable in both themes. A status letter sits on a tinted pill with
+`label-primary` text instead of carrying its meaning in the state colour alone,
+which fails text contrast (2.3:1 for success, 2.2:1 for warning on white).
+
+The panel is a narrow column, so its layout responds to its own width through
+`@container` queries rather than to the viewport: the image pair stacks and the
+PR row becomes a column at 420px and 340px of panel width. Only the compact
+layout is rendered, so its rules are the only ones the stylesheet carries.
+Infinite motion is dropped under `prefers-reduced-motion`.
+
+The tab strip follows the ARIA tabs pattern: it answers Arrow/Home/End, exposes
+one tab in the tab order, and each tab names the panel through `aria-controls`.
+The confirmation dialog is portalled to the document body — the Sidebar panel is
+moved with a transform, which would otherwise confine its `position: fixed`
+scrim to the panel — traps Tab inside itself, focuses Cancel rather than Run so
+a stray Enter cannot confirm a destructive command, and restores the previous
+focus when it closes.
 
 Selecting an image file (`png`, `jpg`, `jpeg`, `jfif`, `gif`, `webp`, `bmp`,
 `ico`, `avif`, `svg`) opens a preview instead of a textual diff: the old and the
