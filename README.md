@@ -65,9 +65,8 @@ the Host. An open pull request for the same branch is shown as a link instead of
 a second form, and the panel never opens one on its own.
 
 Once a pull request is open — whether it was created here or already existed —
-the card offers **Merge pull request**. It asks first, naming the head branch and
-the `gh pr merge <branch> --merge` command it will run, then rereads the state so
-the merged summary replaces the composer. Nothing merges without that confirmation.
+the card offers **Merge pull request**. It runs `gh pr merge <branch> --merge`
+directly, then rereads the state so the merged summary replaces the composer.
 
 When `gh pr view <branch>` reports the branch's pull request as **merged**, the
 card switches to a merged summary carrying the base branch and a link to the
@@ -78,9 +77,10 @@ request, plus the two ways out of the merged branch:
 | **Delete worktree** | the session runs in a linked worktree | `ctx.workingDirectory.set` to the main checkout, then `git worktree remove --force --force -- <checkout>`, falling back to deleting the directory and `git worktree prune` when git still refuses |
 | **Switch to \<base\>** | the session runs in the main checkout, the tree is clean, and the base branch exists locally or on `origin` | `git checkout <base>` (tracking `origin/<base>` when no local branch exists) and `git pull --ff-only` |
 
-Deleting a worktree removes its directory from disk. The panel asks first, and the
-confirmation says so when the checkout still holds uncommitted changes: those are
-discarded along with the directory. The Host runs the strongest form git offers
+Deleting a worktree removes its directory from disk without a confirmation step.
+When the checkout still holds uncommitted changes, the merged card says so and
+those changes are discarded along with the directory. The Host runs the strongest
+form git offers
 (`--force` twice, which also overrides a lock), and when git still declines — a
 registration whose `.git` file went missing, for example — it deletes the directory
 itself and prunes the registration, so no worktree directory survives the action.
@@ -115,8 +115,10 @@ published again. A branch that is behind keeps push disabled and prints why,
 instead of letting git reject it. The push dialog names the branch and the
 number of commits it will send.
 
-Every destructive action opens a confirmation dialog that prints the exact
-command it will run. The dialog closes on Escape or a click outside it.
+Most destructive actions open a confirmation dialog that prints the exact
+command they will run; the dialog closes on Escape or a click outside it.
+**Merge pull request** and **Delete worktree** run immediately, since both
+complete a merged branch whose work is already in its base branch.
 
 ## Safety
 

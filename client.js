@@ -205,8 +205,6 @@ window.__ModuleLoader__.load({
       'pr.opened': 'Pull request created.',
       'pr.merge': 'Merge pull request',
       'pr.mergeHint': 'Merge this pull request into its base branch',
-      'pr.mergeConfirm': 'Merge the pull request for {branch}? The base branch changes on the remote and this cannot be undone here.',
-      'pr.mergeCommand': 'gh pr merge {branch} --merge',
       'pr.noGh': 'The GitHub CLI (gh) is not installed: install it to open pull requests here.',
       'pr.notAuthenticated': 'The GitHub CLI is not signed in: run `gh auth login` first.',
       'pr.merged': 'Pull request merged',
@@ -217,8 +215,6 @@ window.__ModuleLoader__.load({
       'pr.mergedLink': 'Open pull request',
       'wt.delete': 'Delete worktree',
       'wt.deleteHint': 'Move the session to {main} and delete {path} from disk',
-      'wt.deleteConfirm': 'Delete the worktree at {path}? The session moves to the main checkout and the directory is removed from disk.',
-      'wt.deleteDirtyConfirm': 'Delete the worktree at {path}? It still has uncommitted changes, and deleting it discards them permanently.',
       'wt.deleteDirtyHint': 'This worktree still has uncommitted changes: deleting it discards them.',
       'base.checkout': 'Switch to {base}',
       'base.checkoutHint': 'Check out {base} and fast-forward it to the remote',
@@ -1104,17 +1100,6 @@ window.__ModuleLoader__.load({
         }
       };
 
-      /** Ask before merging the open pull request, which changes the remote. */
-      const askMergePullRequest = () => ask({
-        title: t('pr.merge'),
-        description: t('pr.mergeConfirm', { branch: prBranch }),
-        command: t('pr.mergeCommand', { branch: prBranch }),
-        onConfirm: () => {
-          setConfirm(null);
-          void runMergePullRequest();
-        },
-      });
-
       /** Remove the linked worktree this session runs in, moving it to the main checkout. */
       const deleteWorktree = async () => {
         setPrBusy(true);
@@ -1133,23 +1118,6 @@ window.__ModuleLoader__.load({
           setPrBusy(false);
         }
       };
-
-      /**
-       * Ask before deleting the worktree, which discards anything uncommitted
-       * in it along with the directory itself.
-       */
-      const askDeleteWorktree = () => ask({
-        title: t('wt.delete'),
-        description: status !== null && status.files.length > 0
-          ? t('wt.deleteDirtyConfirm', { path: worktree.current })
-          : t('wt.deleteConfirm', { path: worktree.current }),
-        command: `git worktree remove --force --force -- ${worktree.current}`,
-        destructive: true,
-        onConfirm: () => {
-          setConfirm(null);
-          void deleteWorktree();
-        },
-      });
 
       /** Switch to the merged pull request's base branch and fast-forward it. */
       const checkoutBase = async (base) => {
@@ -1334,7 +1302,7 @@ window.__ModuleLoader__.load({
                     className: 'gctl-mainActionButton gctl-primary',
                     title: t('pr.mergeHint'),
                     disabled: prBusy,
-                    onClick: () => askMergePullRequest(),
+                    onClick: () => void runMergePullRequest(),
                   },
                   h(Glyph, { name: 'check', size: 14 }),
                   h('span', null, prBusy ? t('working') : t('pr.merge')),
@@ -1488,7 +1456,7 @@ window.__ModuleLoader__.load({
                         className: 'gctl-mainActionButton gctl-dangerSolid',
                         title: t('wt.deleteHint', { main: worktree.main, path: worktree.current }),
                         disabled: prBusy,
-                        onClick: () => askDeleteWorktree(),
+                        onClick: () => void deleteWorktree(),
                       },
                       h(Glyph, { name: 'trash', size: 14 }),
                       h('span', null, prBusy ? t('working') : t('wt.delete')),
