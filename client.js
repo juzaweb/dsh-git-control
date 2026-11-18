@@ -204,6 +204,14 @@ window.__ModuleLoader__.load({
       'pr.opened': 'Pull request created.',
       'pr.merge': 'Merge pull request',
       'pr.mergeHint': 'Merge this pull request into its base branch',
+      'pr.conflict': 'This pull request conflicts with {base}: rebase the branch before merging.',
+      'pr.conflictUnknownBase': 'This pull request conflicts with its base branch: rebase the branch before merging.',
+      'pr.rebase': 'Rebase {base}',
+      'pr.rebasePlain': 'Rebase',
+      'pr.rebaseHint': 'Send "Rebase {base}" to this session',
+      'pr.rebaseUnknownHint': 'Ask this session to rebase the branch onto its base branch',
+      'pr.rebaseSent': 'Sent "Rebase {base}" to this session.',
+      'pr.rebaseUnknownSent': 'Sent the rebase request to this session.',
       'pr.noGh': 'The GitHub CLI (gh) is not installed: install it to open pull requests here.',
       'pr.notAuthenticated': 'The GitHub CLI is not signed in: run `gh auth login` first.',
       'pr.merged': 'Pull request merged',
@@ -731,7 +739,7 @@ window.__ModuleLoader__.load({
      * @returns the panel element.
      */
     function GitControlPage(props) {
-      const { t, useWorkspaces, fixedPath, sessionId = null } = props;
+      const { t, useWorkspaces, fixedPath, sessionId = null, sendPrompt } = props;
       const workspaces = useWorkspaces === undefined
         ? []
         : useWorkspaces((snapshot) => snapshot.items);
@@ -771,6 +779,8 @@ window.__ModuleLoader__.load({
       const prBaseEditedRef = React.useRef(false);
       const [prBusy, setPrBusy] = React.useState(false);
       const [prResult, setPrResult] = React.useState(null);
+      /* Base branch a rebase was last requested for, so the card can confirm it. */
+      const [prRebaseSent, setPrRebaseSent] = React.useState(null);
       const [prReload, setPrReload] = React.useState(0);
 
       const toggleGroup = (key) => setCollapsedGroups((current) => ({ ...current, [key]: !current[key] }));
@@ -922,6 +932,7 @@ window.__ModuleLoader__.load({
         setPrBody('');
         setPrBase('');
         setPrResult(null);
+        setPrRebaseSent(null);
       }, [prBranch, chosenPath]);
 
       /**
@@ -1148,6 +1159,26 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /**
+       * Ask this session's agent to rebase the branch onto its base branch.
+       * The request is sent as an ordinary user message in the chat.
+       * @param base - base branch the request names, or null when none is known.
+       */
+      const requestRebase = async (base) => {
+        const name = typeof base === 'string' && base !== '' ? base : null;
+        const prompt = name === null ? 'Rebase the branch onto its base branch' : `Rebase ${name}`;
+        setPrBusy(true);
+        setError(null);
+        try {
+          await sendPrompt(sessionId, prompt);
+          setPrRebaseSent({ base: name });
+        } catch (err) {
+          setError(failureOf(err));
+        } finally {
+          setPrBusy(false);
+        }
+      };
+
       /** Merge the open pull request, then reread the pull request state. */
       const runMergePullRequest = async () => {
         setPrBusy(true);
@@ -1367,27 +1398,69 @@ window.__ModuleLoader__.load({
           ? requested
           : (typeof info?.base === 'string' && bases.includes(info.base) ? info.base : bases[0]);
         const canSubmit = !prBusy && prTitle.trim() !== '' && base !== '';
+        /* GitHub reports the conflict on the open request, so the merge gives way
+           to the one action that can clear it: asking this session to rebase. */
+        const conflict = info?.conflict ?? null;
+        const conflictBase = typeof conflict?.base === 'string' && conflict.base !== ''
+          ? conflict.base
+          : (base !== '' ? base : null);
+        const canRebase = !prBusy && typeof sessionId === 'string' && sessionId !== '' && typeof sendPrompt === 'function';
 
         const body = existingUrl !== null
           ? h(
               'div',
               { className: 'gctl-prForm' },
               h('p', { className: 'gctl-hint' }, prResult === null ? t('pr.existing') : t('pr.opened')),
+              conflict === null
+                ? null
+                : h(
+                    'p',
+                    { className: 'gctl-hint gctl-hintBad' },
+                    conflictBase === null
+                      ? t('pr.conflictUnknownBase')
+                      : t('pr.conflict', { base: conflictBase }),
+                  ),
+              prRebaseSent === null || conflict === null
+                ? null
+                : h(
+                    'p',
+                    { className: 'gctl-hint' },
+                    prRebaseSent.base === null
+                      ? t('pr.rebaseUnknownSent')
+                      : t('pr.rebaseSent', { base: prRebaseSent.base }),
+                  ),
               h(
                 'div',
                 { className: 'gctl-prRow' },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'gctl-mainActionButton gctl-primary',
-                    title: t('pr.mergeHint'),
-                    disabled: prBusy,
-                    onClick: () => void runMergePullRequest(),
-                  },
-                  h(Glyph, { name: 'check', size: 14 }),
-                  h('span', null, prBusy ? t('working') : t('pr.merge')),
-                ),
+                conflict === null
+                  ? h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'gctl-mainActionButton gctl-primary',
+                        title: t('pr.mergeHint'),
+                        disabled: prBusy,
+                        onClick: () => void runMergePullRequest(),
+                      },
+                      h(Glyph, { name: 'check', size: 14 }),
+                      h('span', null, prBusy ? t('working') : t('pr.merge')),
+                    )
+                  : h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: `gctl-mainActionButton${canRebase ? ' gctl-primary' : ''}`,
+                        title: conflictBase === null ? t('pr.rebaseUnknownHint') : t('pr.rebaseHint', { base: conflictBase }),
+                        disabled: !canRebase,
+                        onClick: () => void requestRebase(conflictBase),
+                      },
+                      h(Glyph, { name: 'pull', size: 14 }),
+                      h('span', null, prBusy
+                        ? t('working')
+                        : conflictBase === null
+                          ? t('pr.rebasePlain')
+                          : t('pr.rebase', { base: conflictBase })),
+                    ),
               ),
             )
           : prInfo === null || prInfo.phase === 'loading'
@@ -2617,7 +2690,7 @@ window.__ModuleLoader__.load({
      * @returns the panel, or a hint when no directory is known.
      */
     function GitRightPane(props) {
-      const { t, useWorkspaces, useSessions, useProjection, sessionId } = props;
+      const { t, useWorkspaces, useSessions, useProjection, sessionId, sendPrompt } = props;
       const workspaces = useWorkspaces === undefined
         ? []
         : useWorkspaces((snapshot) => snapshot.items);
@@ -2640,7 +2713,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'gctl-content' }, h('p', { className: 'gctl-hint' }, t('view.noDirectory'))),
         );
       }
-      return h(GitControlPage, { t, useWorkspaces, fixedPath: directory, sessionId });
+      return h(GitControlPage, { t, useWorkspaces, fixedPath: directory, sessionId, sendPrompt });
     }
 
     /**
@@ -2660,6 +2733,24 @@ window.__ModuleLoader__.load({
     function apply(ctx) {
       ctx.effect(() => ctx.locale.register(NS, 'en', DICTIONARY), 'git-control: dictionary');
       const t = ctx.locale.bind(NS);
+
+      /**
+       * Deliver one prompt to the Session this panel belongs to.
+       * The prompt enters the Session as an ordinary user message.
+       * @param sessionId - the Session whose composer receives the prompt.
+       * @param text - the prompt text.
+       * @returns completion; rejects when the Session or its Conversation is absent.
+       */
+      const sendPrompt = (sessionId, text) => {
+        const scope = typeof sessionId === 'string' && sessionId !== ''
+          ? ctx.sessions.scope(sessionId)
+          : undefined;
+        const conversation = scope?.get('conversation');
+        if (conversation === undefined) {
+          return Promise.reject(new Error('This panel is not bound to a running session.'));
+        }
+        return conversation.send(text);
+      };
 
       /*
        * The tab type is what puts the entry on the right Sidebar's Guide page.
@@ -2682,11 +2773,14 @@ window.__ModuleLoader__.load({
         }), 'git-control: tab type');
       });
 
+      /* One stable body component per apply, so a slot re-injection never remounts the panel. */
+      const GitRightPaneWithPrompt = (props) => h(GitRightPane, { ...props, sendPrompt });
+
       ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
         name: 'sidebar.right.pane.tab',
         key: TAB_ID,
         locale: NS,
-      }, GitRightPane));
+      }, GitRightPaneWithPrompt));
       ctx.slots.inject('sidebar.right.pane.tab.title', () => ctx.slots.register({
         name: 'sidebar.right.pane.tab.title',
         key: TAB_ID,
@@ -2694,6 +2788,6 @@ window.__ModuleLoader__.load({
       }, GitRightTitle));
     }
 
-    return { inject: ['slots', 'locale'], apply };
+    return { inject: ['slots', 'locale', 'sessions'], apply };
   },
 });

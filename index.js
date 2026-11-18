@@ -73,6 +73,18 @@ const GH_ENV = {
 };
 
 /**
+ * Whether a pull request cannot merge as it stands.
+ * GitHub answers CONFLICTING on the mergeable field and DIRTY on the merge
+ * state; UNKNOWN means it has not finished computing, so it is not a conflict.
+ * @param state - one `pullRequestState` result.
+ * @returns whether the branch has to be rebased before merging.
+ */
+function isConflicted(state) {
+  if (state.mergeable === 'CONFLICTING') return true;
+  return state.mergeStateStatus === 'DIRTY';
+}
+
+/**
  * Model selection used for generated commit messages.
  * @typedef {object} CommitModelSelection
  * @property {string} provider - registered provider route.
@@ -1275,7 +1287,7 @@ class GitControl {
    * @param root - repository root.
    * @param branch - the head branch.
    * @param signal - caller cancellation.
-   * @returns `{ state, url, number, baseRefName, mergedAt }`, or null.
+   * @returns `{ state, url, number, baseRefName, mergedAt, mergeable, mergeStateStatus }`, or null.
    */
   async pullRequestState(root, branch, signal) {
     const result = await this.runTool(root, [
@@ -1284,7 +1296,7 @@ class GitControl {
       'view',
       branch,
       '--json',
-      'state,mergedAt,url,number,baseRefName',
+      'state,mergedAt,url,number,baseRefName,mergeable,mergeStateStatus',
     ], { signal, timeoutMs: NETWORK_TIMEOUT_MS, env: GH_ENV, acceptCodes: [0, 1] });
     if (result.exitCode !== 0) return null;
     try {
@@ -1296,6 +1308,8 @@ class GitControl {
         number: typeof row.number === 'number' ? row.number : null,
         baseRefName: typeof row.baseRefName === 'string' ? row.baseRefName : null,
         mergedAt: typeof row.mergedAt === 'string' ? row.mergedAt : null,
+        mergeable: typeof row.mergeable === 'string' ? row.mergeable : null,
+        mergeStateStatus: typeof row.mergeStateStatus === 'string' ? row.mergeStateStatus : null,
       };
     } catch {
       return null;
@@ -1390,6 +1404,7 @@ class GitControl {
         bases: [],
         existing: null,
         merged: null,
+        conflict: null,
         suggestedTitle: null,
         worktree,
       };
@@ -1407,6 +1422,10 @@ class GitControl {
     const merged = state !== null && state.state === 'MERGED'
       ? { url: state.url, number: state.number, base: state.baseRefName, mergedAt: state.mergedAt }
       : null;
+    /* GitHub computes mergeability asynchronously, so UNKNOWN means "ask again". */
+    const conflict = state !== null && state.state === 'OPEN' && isConflicted(state)
+      ? { base: state.baseRefName, mergeable: state.mergeable, mergeStateStatus: state.mergeStateStatus }
+      : null;
     const suggestedTitle = await this.suggestedTitle(root, branches.base, status.branch, signal);
     return {
       branch: status.branch,
@@ -1416,6 +1435,7 @@ class GitControl {
       bases: branches.bases,
       existing,
       merged,
+      conflict,
       suggestedTitle,
       worktree,
     };

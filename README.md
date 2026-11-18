@@ -108,6 +108,16 @@ Once a pull request is open â€” whether it was created here or already existed â
 the card offers **Merge pull request**. It runs `gh pr merge <branch> --merge`
 directly, then rereads the state so the merged summary replaces the composer.
 
+The same read asks GitHub for the pull request's mergeability
+(`gh pr view <branch> --json mergeable,mergeStateStatus`). When it answers
+`CONFLICTING`, or `DIRTY` for the merge state, the branch cannot merge as it
+stands: the card says which base branch it conflicts with and replaces
+**Merge pull request** with **Rebase \<base\>**. Pressing it sends the prompt
+`Rebase <base>` to the Session the panel belongs to, so the agent performs the
+rebase and resolves the conflicts. GitHub computes mergeability asynchronously,
+so an `UNKNOWN` answer keeps the merge action and the slow reread picks the
+conflict up on its next pass.
+
 When `gh pr view <branch>` reports the branch's pull request as **merged**, the
 card switches to a merged summary carrying the base branch and a link to the
 request, plus the two ways out of the merged branch:
