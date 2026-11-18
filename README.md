@@ -6,7 +6,16 @@ them, manage branches and stashes, and sync with the remote.
 
 ## Where it lives
 
-One surface: a **tab in the right Sidebar**, next to Workspace files, Terminal,
+Two surfaces.
+
+**The composer toolbar.** A **Review code** button sits in the chat composer's
+tool row, beside the mode chips. It needs no tab open: one click submits the
+message `/code-review-and-quality review and fix` to the current Session, which
+runs the `code-review-and-quality` skill as an ordinary turn and fixes what it
+finds. The draft already in the composer is left untouched. The label collapses
+to its glyph in a narrow composer.
+
+**A tab in the right Sidebar**, next to Workspace files, Terminal,
 and Session Log. The tab is scoped to the open Session's working directory, so
 it follows that Session into a Git worktree and shows no picker.
 

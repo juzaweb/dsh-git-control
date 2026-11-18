@@ -227,6 +227,9 @@ window.__ModuleLoader__.load({
       'base.checkoutHint': 'Check out {base} and fast-forward it to the remote',
       'notice.failed': 'The git command failed.',
       'view.noDirectory': 'This session has no working directory to inspect.',
+      'review.button': 'Review code',
+      'review.buttonHint': 'Ask this session to review the current changes and fix what it finds',
+      'review.failed': 'The review request could not be sent.',
     };
 
     /**
@@ -620,6 +623,11 @@ window.__ModuleLoader__.load({
       chevronRight: [['path', { d: 'M6.5 4 10.5 8 6.5 12' }]],
       refresh: [['path', { d: 'M13 8a5 5 0 1 1-1.6-3.7' }], ['path', { d: 'M13.2 2.9v2.8h-2.8' }]],
       close: [['path', { d: 'M4.6 4.6 11.4 11.4' }], ['path', { d: 'M11.4 4.6 4.6 11.4' }]],
+      review: [
+        ['path', { d: 'M5.5 2.9h5l2.6 2.6v6.1a1.5 1.5 0 0 1-1.5 1.5h-6.1a1.5 1.5 0 0 1-1.5-1.5V4.4a1.5 1.5 0 0 1 1.5-1.5Z' }],
+        ['path', { d: 'M10.4 2.9v2.5h2.5' }],
+        ['path', { d: 'M5.6 8.1 7.1 9.6 10.5 6.2' }],
+      ],
     };
 
     /**
@@ -2716,6 +2724,126 @@ window.__ModuleLoader__.load({
       return h(GitControlPage, { t, useWorkspaces, fixedPath: directory, sessionId, sendPrompt });
     }
 
+    /** Prompt the button submits: a leading skill gesture plus its request. */
+    const REVIEW_PROMPT = '/code-review-and-quality review and fix';
+
+    /** Styling for the composer-toolbar button; it rides the card's own theme tokens. */
+    const REVIEW_CSS = `
+      .gctl-review {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex: none;
+        height: 28px;
+        padding: 0 8px;
+        border: none;
+        border-radius: var(--dsw-radius-sm);
+        background: transparent;
+        color: var(--dsw-alias-label-secondary);
+        font-size: 13px;
+        font-weight: 500;
+        line-height: 20px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      @media (hover: hover) {
+        .gctl-review:hover:not([aria-disabled='true']) {
+          background: var(--dsw-alias-interactive-bg-hover);
+        }
+      }
+      .gctl-review:focus-visible {
+        outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+        outline-offset: 2px;
+      }
+      .gctl-review[aria-disabled='true'] {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .gctl-review-glyph {
+        display: inline-flex;
+        flex: none;
+        width: 14px;
+        height: 14px;
+      }
+      .gctl-review-status {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+      @container (max-width: 560px) {
+        .gctl-review-label { display: none; }
+        .gctl-review { padding: 0 6px; }
+      }
+    `;
+
+    /**
+     * Render the composer-toolbar "Review code" button.
+     *
+     * A click submits one ordinary user message carrying the skill gesture, so
+     * the review runs as a normal turn of this session. The draft already in
+     * the composer is left untouched. While the send is in flight the button
+     * stays focusable — disabling a focused control would drop the keyboard
+     * focus the user just landed on — and a ref closes the double-click window
+     * that `aria-disabled` alone leaves open.
+     * @param props - slot props: localized copy and the submitter injected below.
+     * @returns the button.
+     */
+    function ReviewCodeButton({ t, requestReview }) {
+      const [busy, setBusy] = React.useState(false);
+      const [failure, setFailure] = React.useState(null);
+      const alive = React.useRef(true);
+      const inFlight = React.useRef(false);
+      React.useEffect(() => () => { alive.current = false; }, []);
+
+      const onClick = () => {
+        if (inFlight.current) return;
+        inFlight.current = true;
+        setBusy(true);
+        setFailure(null);
+        // The call runs inside the chain so a synchronous throw settles it too.
+        Promise.resolve()
+          .then(() => requestReview())
+          .then(
+            () => {
+              inFlight.current = false;
+              if (alive.current) setBusy(false);
+            },
+            () => {
+              inFlight.current = false;
+              if (!alive.current) return;
+              setBusy(false);
+              setFailure(t('review.failed'));
+            },
+          );
+      };
+
+      return h(
+        React.Fragment,
+        null,
+        h('style', null, REVIEW_CSS),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'gctl-review',
+            'aria-label': t('review.button'),
+            'aria-disabled': busy ? 'true' : undefined,
+            title: t('review.buttonHint'),
+            onClick,
+          },
+          h('span', { className: 'gctl-review-glyph' }, h(Glyph, { name: 'review', size: 14 })),
+          h('span', { className: 'gctl-review-label' }, t('review.button')),
+        ),
+        h('span', { className: 'gctl-review-status', role: 'status', 'aria-live': 'polite' }, failure ?? ''),
+      );
+    }
+
     /**
      * Render the right-Sidebar tab chip: the branch glyph beside the tab title.
      * @param props - tab information hook supplied by the tab seat.
@@ -2786,6 +2914,20 @@ window.__ModuleLoader__.load({
         key: TAB_ID,
         locale: NS,
       }, GitRightTitle));
+
+      /*
+       * The composer-toolbar button. It rides the resident composer card, so
+       * it appears for every Session without opening the panel, and it asks
+       * the session to review the current changes in an ordinary turn.
+       */
+      const ReviewCodeWithPrompt = (props) => h(ReviewCodeButton, { ...props, requestReview: () => sendPrompt(props.sessionId, REVIEW_PROMPT) });
+
+      ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+        name: 'conversation.input.left',
+        id: 'git-control-review',
+        order: 10,
+        locale: NS,
+      }, ReviewCodeWithPrompt));
     }
 
     return { inject: ['slots', 'locale', 'sessions'], apply };
