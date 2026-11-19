@@ -213,9 +213,11 @@ complete a merged branch whose work is already in its base branch.
   rendered diff.
 - **Bounded generation.** The prompt carries at most 24 000 characters of diff,
   the call is capped at 320 output tokens and 60 s, and the reply is reduced to
-  a plain message. Message generation is the only path that leaves the machine,
-  it never writes to the repository, and a profile without a usable model
-  reports an error instead of guessing.
+  a plain message. A reply that carries no usable message is retried three
+  times, 30 s apart, before the action reports an error; cancelling the request
+  ends the wait at once. Message generation is the only path that leaves the
+  machine, it never writes to the repository, and a profile without a usable
+  model reports an error instead of guessing.
 
 ## Configuration
 

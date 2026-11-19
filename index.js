@@ -52,6 +52,9 @@ const MESSAGE_MAX_CHARS = 4000;
 const PROMPT_DIFF_CHARS = 24_000;
 /** Ceiling for one message-generation call. */
 const MESSAGE_TIMEOUT_MS = 60_000;
+/** Retries for a reply that carried no usable message, and the gap between them. */
+const MESSAGE_RETRY_LIMIT = 3;
+const MESSAGE_RETRY_DELAY_MS = 30_000;
 
 /** Branches that a pull request is opened *against*, never from. */
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
@@ -1945,6 +1948,11 @@ class GitControl {
 
   /**
    * Generate a commit message for the current change.
+   *
+   * A model sometimes answers with nothing usable. Rather than making the user
+   * press Generate again, the call retries `MESSAGE_RETRY_LIMIT` times, waiting
+   * `MESSAGE_RETRY_DELAY_MS` between attempts. Cancellation ends the loop at once.
+   *
    * @param input - `{ path }`.
    * @param signal - caller cancellation.
    * @returns the generated message.
@@ -1964,7 +1972,44 @@ class GitControl {
       );
     }
     const context = await this.commitContext(root, status, signal);
-    return this.completeCommitMessage(selection, context, signal);
+
+    let lastError = null;
+    for (let attempt = 0; attempt <= MESSAGE_RETRY_LIMIT; attempt += 1) {
+      if (attempt > 0) {
+        this.logger.warn(`git control: no usable commit message, retry ${attempt}/${MESSAGE_RETRY_LIMIT} in ${MESSAGE_RETRY_DELAY_MS}ms`);
+        await this.delay(MESSAGE_RETRY_DELAY_MS, signal);
+      }
+      try {
+        const result = await this.completeCommitMessage(selection, context, signal);
+        if (attempt > 0) this.logger.info(`git control: commit message generated on attempt ${attempt + 1}`);
+        return result;
+      } catch (error) {
+        if (error?.code !== 'git-control/empty-message') throw error;
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * Wait before one retry, ending early when the caller cancels.
+   * @param ms - how long to wait.
+   * @param signal - caller cancellation.
+   * @returns resolves after the wait or on cancellation.
+   */
+  delay(ms, signal) {
+    if (signal?.aborted) return Promise.reject(gitFailure('git-control/cancelled', 'Message generation was cancelled.'));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(gitFailure('git-control/cancelled', 'Message generation was cancelled.'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /**
