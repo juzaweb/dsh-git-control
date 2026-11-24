@@ -429,17 +429,36 @@ function parseStatus(stdout) {
   return { branch, upstream, upstreamGone, ahead, behind, detached, noCommits, files };
 }
 
+/** Markup a model prints when it tries to run a command instead of answering. */
+const TOOL_CALL_MARKUP = /<\/?(?:tool_calls?|function_calls?|arg_key|arg_value)\b|<\|tool[^|>]*\|>/iu;
+/** Openers a model writes when it narrates the work instead of writing the message. */
+const REPLY_CHATTER = /^(?:i(?:'ll| will| am| think)\b|let me\b|sure\b|okay\b|ok\b|here (?:is|are)\b|here's\b|looking at\b|now i\b)/iu;
+
 /**
  * Reduce a model reply to a commit message.
+ *
+ * A model given a diff sometimes decides to inspect the repository instead of
+ * writing the message, so its reply ends in tool-call markup. Everything from
+ * the call onward is markup, and a reply that only narrates the intent is not a
+ * message at all: both come back as the empty string, which the caller retries.
+ *
  * @param value - raw model output.
- * @returns the trimmed message, at most `MESSAGE_MAX_CHARS` characters.
+ * @returns the trimmed message, at most `MESSAGE_MAX_CHARS` characters, or `''`
+ * when the reply carries no message.
  */
 function cleanCommitMessage(value) {
-  let text = String(value).replace(/\r\n/gu, '\n').trim();
+  let text = String(value).replace(/\r\n/gu, '\n');
+  const markup = TOOL_CALL_MARKUP.exec(text);
+  if (markup !== null) text = text.slice(0, markup.index);
+  text = text.trim();
   const fenced = /^```[A-Za-z]*\n([\s\S]*?)\n?```$/u.exec(text);
   if (fenced !== null) text = fenced[1].trim();
   text = text.replace(/^(?:commit message|message)\s*:\s*/iu, '');
   text = text.replace(/^["'`]+/u, '').replace(/["'`]+$/u, '').trim();
+  const lines = text.split('\n');
+  while (lines.length > 1 && (lines[0].trim() === '' || REPLY_CHATTER.test(lines[0].trim()))) lines.shift();
+  text = lines.join('\n').trim();
+  if (text === '' || REPLY_CHATTER.test(text)) return '';
   return text.slice(0, MESSAGE_MAX_CHARS).trim();
 }
 
@@ -1865,9 +1884,10 @@ class GitControl {
    * @param selection - provider, model, and optional reasoning effort.
    * @param context - the material gathered by `commitContext`.
    * @param signal - caller cancellation.
+   * @param attempt - retry index; a retry says what the previous reply got wrong.
    * @returns the cleaned message.
    */
-  async completeCommitMessage(selection, context, signal) {
+  async completeCommitMessage(selection, context, signal, attempt = 0) {
     const llm = this.ctx.get('llm');
     if (llm === undefined) {
       throw gitFailure('git-control/no-model', 'The llm service is unavailable, so no message can be generated.');
@@ -1913,16 +1933,24 @@ class GitControl {
         },
       );
 
+      const instructions = [
+        'You write one git commit message for the staged change described below.',
+        'Reply with the message only: no preamble, no explanation, no code fences, no quotes.',
+        'First line: imperative mood, at most 72 characters, no trailing period.',
+        'Add a short body after one blank line only when the change needs the detail.',
+        'Use Conventional Commit prefixes (feat, fix, refactor, docs, test, chore) when they fit.',
+        'Write in English and describe only what the diff shows.',
+        /* The diff is the entire material: a model that reaches for a command
+           prints tool-call markup into the message instead of answering. */
+        'You have no tools and cannot run commands; the text below is all there is.',
+      ];
+      if (attempt > 0) {
+        instructions.push('The previous reply was not a commit message: answer with the message text alone, never with a tool call.');
+      }
+
       const stream = call.stream({
         ...call.config,
-        system: [
-          'You write one git commit message for the staged change described below.',
-          'Reply with the message only: no preamble, no explanation, no code fences, no quotes.',
-          'First line: imperative mood, at most 72 characters, no trailing period.',
-          'Add a short body after one blank line only when the change needs the detail.',
-          'Use Conventional Commit prefixes (feat, fix, refactor, docs, test, chore) when they fit.',
-          'Write in English and describe only what the diff shows.',
-        ].join(' '),
+        system: instructions.join(' '),
         messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
         signal: controller.signal,
       });
@@ -1997,7 +2025,7 @@ class GitControl {
         await this.delay(MESSAGE_RETRY_DELAY_MS, signal);
       }
       try {
-        const result = await this.completeCommitMessage(selection, context, signal);
+        const result = await this.completeCommitMessage(selection, context, signal, attempt);
         if (attempt > 0) this.logger.info(`git control: commit message generated on attempt ${attempt + 1}`);
         return result;
       } catch (error) {

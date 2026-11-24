@@ -44,12 +44,16 @@ const context = { files: 'M a.js', scope: 'staged', diff: '', truncated: false, 
 
 /**
  * A fake `llm` service. `efforts` is the route's reasoning metadata, or null
- * for a route that does not reason; each prepared call's controls are recorded.
+ * for a route that does not reason; each prepared call's controls and stream
+ * request are recorded. `reply` is one text, or a list returned in turn.
  */
 function fakeLlm(reply, efforts = ['off', 'low', 'high']) {
   const calls = [];
+  const requests = [];
+  const replies = Array.isArray(reply) ? reply.slice() : null;
   return {
     calls,
+    requests,
     async prepareCall(config, _signal, configure) {
       const effortsInfo = efforts === null
         ? {}
@@ -64,10 +68,14 @@ function fakeLlm(reply, efforts = ['off', 'low', 'high']) {
       calls.push(controls);
       return {
         config: { provider: config.provider, model: config.model, ...controls },
-        stream: () => (async function* replyText() {
-          yield { type: 'text-delta', text: reply };
-          yield { type: 'finish', reason: { kind: 'stop' } };
-        })(),
+        stream: (request) => {
+          requests.push(request);
+          const text = replies === null ? reply : replies.shift() ?? '';
+          return (async function* replyText() {
+            yield { type: 'text-delta', text };
+            yield { type: 'finish', reason: { kind: 'stop' } };
+          })();
+        },
       };
     },
   };
@@ -155,6 +163,58 @@ test('a model failure is reported at once instead of retried', async () => {
   await assert.rejects(service.generateCommitMessage({ path: '/repo' }), /provider exploded/);
   assert.equal(calls, 1);
   assert.deepEqual(waits, []);
+});
+
+test('a reply that narrates a tool call is not used as the message', async () => {
+  const llm = fakeLlm("I'll examine the staged changes more closely.\n<tool_call>bash<arg_key>command</arg_key><arg_value>git diff --cached</arg_value></tool_call>");
+  const { service } = mount({ provider: 'p', model: 'm' }, llm);
+
+  await assert.rejects(
+    service.completeCommitMessage({ provider: 'p', model: 'm' }, context),
+    (error) => error.code === 'git-control/empty-message',
+  );
+});
+
+test('a message that precedes a tool call keeps its text', async () => {
+  const llm = fakeLlm('fix: keep the staged config\n\n<tool_call>bash<arg_key>command</arg_key>');
+  const { service } = mount({ provider: 'p', model: 'm' }, llm);
+
+  const result = await service.completeCommitMessage({ provider: 'p', model: 'm' }, context);
+
+  assert.equal(result.message, 'fix: keep the staged config');
+});
+
+test('a narrated preamble above the message is dropped', async () => {
+  const llm = fakeLlm('Here is the commit message:\n\nfix: keep the staged config');
+  const { service } = mount({ provider: 'p', model: 'm' }, llm);
+
+  const result = await service.completeCommitMessage({ provider: 'p', model: 'm' }, context);
+
+  assert.equal(result.message, 'fix: keep the staged config');
+});
+
+test('the call rules out tools, and a retry says why the last reply failed', async () => {
+  const llm = fakeLlm('chore: drop dead code');
+  const { service } = mount({ provider: 'p', model: 'm' }, llm);
+
+  await service.completeCommitMessage({ provider: 'p', model: 'm' }, context, undefined, 1);
+
+  assert.match(llm.requests[0].system, /no tools/u);
+  assert.match(llm.requests[0].system, /previous reply was not a commit message/u);
+});
+
+test('a tool-call reply is retried until the model writes the message', async () => {
+  const llm = fakeLlm([
+    "I'll inspect the staged files first.\n<tool_call>bash<arg_key>command</arg_key><arg_value>git diff --cached --stat</arg_value></tool_call>",
+    'feat: add the git panel',
+  ]);
+  const { service, waits } = mount({ provider: 'p', model: 'm' }, llm);
+
+  const result = await service.generateCommitMessage({ path: '/repo' });
+
+  assert.equal(result.message, 'feat: add the git panel');
+  assert.deepEqual(waits, [30_000]);
+  assert.equal(llm.requests.length, 2);
 });
 
 test('cancelling during the wait ends the retry loop', async () => {
