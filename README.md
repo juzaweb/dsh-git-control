@@ -15,6 +15,17 @@ runs the `code-review-and-quality` skill as an ordinary turn and fixes what it
 finds. The draft already in the composer is left untouched. The label collapses
 to its glyph in a narrow composer.
 
+**The `/ship` command.** `/ship <request>` runs the same review as a workflow:
+the request is submitted as one ordinary turn and `/code-review-and-quality
+review and fix` is queued as the next one, so the skill reviews and fixes the
+work that request produced. Attachments typed with the command ride the request
+turn. An empty request is refused with the usage line instead of queueing
+anything. The Host registers the command through `ctx.commands`, so it appears
+in the composer's `/` menu beside `/plan` and `/goal`; the review turn needs the
+`code-review-and-quality` skill in the session's catalog. The review is an
+ordinary queued message: it is visible and removable before it runs, and a Stop
+on the request turn leaves it queued.
+
 **A tab in the right Sidebar**, next to Workspace files, Terminal,
 and Session Log. The tab is scoped to the open Session's working directory, so
 it follows that Session into a Git worktree and shows no picker.
@@ -256,7 +267,7 @@ silently using another model.
 ## Layout
 
 ```
-index.js          Host half: GitControl service, validation, and the two fetch routes
+index.js          Host half: GitControl service, validation, the two fetch routes, and the `/ship` command
 client.js         Client half: the right-Sidebar tab type, its body, and its title
 test/             Behaviour and stylesheet-contract tests for client.js
 cordis.patch.yml  Bundle patch inserting the `git-control` row
@@ -273,7 +284,8 @@ blocked-hover guard stays in place). Run them with `npm test`.
 
 The panel keeps its own strings in `client.js` under the `gitControl` locale
 namespace and translates them through `ctx.locale`. The Host half exposes
-`ctx.gitControl` for other Host plugins; no agent tool is registered yet.
+`ctx.gitControl` for other Host plugins, registers the `/ship` command when a
+command registry is composed, and registers no agent tool yet.
 
 The tab type registers through `ctx.inject(['sidebarRightTabs'], …)` so it
 survives a load order where the right Sidebar mounts after this bundle. Its body

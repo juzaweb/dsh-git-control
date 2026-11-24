@@ -11,6 +11,7 @@ import { apply } from '../index.js';
 /** Mount the service with the minimum context it needs, then take it back. */
 function mount(commitModel, llm = undefined, agentModel = undefined) {
   let service = null;
+  const commands = [];
   const ctx = {
     provide: (_name, value) => {
       service = value;
@@ -21,6 +22,10 @@ function mount(commitModel, llm = undefined, agentModel = undefined) {
       return undefined;
     },
     effect: () => {},
+    inject: (_deps, run) => {
+      run({ commands: { register: (definition) => { commands.push(definition); return () => {}; } } });
+      return () => {};
+    },
     connection: { fetch: { register: () => () => {} } },
     logger: { warn() {}, info() {} },
   };
@@ -34,7 +39,7 @@ function mount(commitModel, llm = undefined, agentModel = undefined) {
     if (signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'git-control/cancelled' });
     waits.push(ms);
   };
-  return { service, waits };
+  return { service, waits, commands };
 }
 
 const emptyFailure = () => Object.assign(new Error('The model returned no usable commit message.'), { code: 'git-control/empty-message' });
@@ -232,4 +237,82 @@ test('cancelling during the wait ends the retry loop', async () => {
 
   await assert.rejects(service.generateCommitMessage({ path: '/repo' }, controller.signal), (error) => error.code === 'git-control/cancelled');
   assert.equal(calls, 1, 'no second model call after cancellation');
+});
+
+/* The `/ship` workflow: one request turn, then the review gesture as its own turn. */
+
+/** Invoke the registered command against an Agent that records its inbox. */
+function ship(rawInput, attachments = []) {
+  const { commands } = mount({ provider: 'p', model: 'm' });
+  assert.equal(commands.length, 1, 'one command registered');
+  const messages = [];
+  const agent = { followup: (message) => { messages.push(message); } };
+  const outcome = commands[0].handler({ agent, rawInput, attachments, signal: new AbortController().signal });
+  return { definition: commands[0], outcome, messages };
+}
+
+test('the command advertises its request hint and attachment support', () => {
+  const { definition } = ship('anything');
+  assert.equal(definition.name, 'ship');
+  assert.match(definition.description, /review/u);
+  assert.deepEqual(definition.input, { hint: '[request]', attachments: true });
+  assert.equal(definition.recordInput, false, 'the queued message already carries the request');
+});
+
+test('the request runs first and the review gesture queues behind it', () => {
+  const { outcome, messages } = ship('  add a README badge  ');
+
+  assert.equal(outcome.kind, 'success');
+  assert.equal(messages.length, 2, 'one turn per message');
+  assert.deepEqual(messages[0].content, [{ type: 'text', text: 'add a README badge' }]);
+  assert.deepEqual(messages[1].content, [{ type: 'text', text: '/code-review-and-quality review and fix' }]);
+  for (const message of messages) {
+    assert.equal(message.role, 'user');
+    // The skill gesture is only scanned in direct user input.
+    assert.deepEqual(message.source, { kind: 'user' });
+    assert.equal(typeof message.id, 'string');
+    assert.ok(message.id.length > 0);
+  }
+  assert.notEqual(messages[0].id, messages[1].id, 'each turn carries its own identity');
+});
+
+test('attachments ride the request turn, ahead of its text', () => {
+  const attachment = { type: 'file', receiptId: 'receipt-1' };
+  const { messages } = ship('rename the field', [attachment]);
+
+  assert.deepEqual(messages[0].content, [attachment, { type: 'text', text: 'rename the field' }]);
+  assert.equal(messages.length, 2);
+});
+
+test('an empty request is refused without queueing a turn', () => {
+  const { outcome, messages } = ship('   ');
+
+  assert.equal(outcome.kind, 'error');
+  assert.match(outcome.text, /Usage: \/ship/u);
+  assert.deepEqual(messages, []);
+});
+
+test('attachments alone are a request', () => {
+  const attachment = { type: 'image', mediaType: 'image/png', data: 'AA==', name: 'shot.png' };
+  const { outcome, messages } = ship('  ', [attachment]);
+
+  assert.equal(outcome.kind, 'success');
+  assert.deepEqual(messages[0].content, [attachment]);
+  assert.equal(messages.length, 2);
+});
+
+test('a profile without a command registry still mounts the service', () => {
+  let service = null;
+  const ctx = {
+    provide: (_name, value) => { service = value; },
+    get: () => undefined,
+    effect: () => {},
+    inject: () => () => {},
+    connection: { fetch: { register: () => () => {} } },
+    logger: { warn() {}, info() {} },
+  };
+
+  apply(ctx, {});
+
+  assert.ok(service !== null, 'the git service still mounts');
 });

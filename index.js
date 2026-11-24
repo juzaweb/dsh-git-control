@@ -7,6 +7,7 @@
  * operations to the Client panel.
  */
 
+import { randomUUID } from 'node:crypto';
 import { realpath, rm } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -56,6 +57,11 @@ const MESSAGE_TIMEOUT_MS = 60_000;
 const MESSAGE_RETRY_LIMIT = 3;
 const MESSAGE_RETRY_DELAY_MS = 30_000;
 
+/** Name the workflow command answers to in the composer's slash menu. */
+const SHIP_COMMAND = 'ship';
+/** The turn the workflow queues after the caller's own request. */
+const SHIP_REVIEW_PROMPT = '/code-review-and-quality review and fix';
+
 /** Branches that a pull request is opened *against*, never from. */
 const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
 /**
@@ -85,6 +91,18 @@ const GH_ENV = {
 function isConflicted(state) {
   if (state.mergeable === 'CONFLICTING') return true;
   return state.mergeStateStatus === 'DIRTY';
+}
+
+/**
+ * Build one ordinary user message the Agent accepts as a prompt.
+ * `@deepseek-ai/dsh-llm` cannot be imported here: a linked local bundle
+ * resolves only its own dependencies, so this mirrors `createUserMessage`
+ * with the source the skill gesture scans.
+ * @param content - model-facing blocks, in order.
+ * @returns a user-role message ready for `agent.followup`.
+ */
+function shipMessage(content) {
+  return { id: randomUUID(), role: 'user', content, source: { kind: 'user' } };
 }
 
 /**
@@ -2145,4 +2163,37 @@ export function apply(ctx, config = {}) {
       for (const dispose of disposers) void dispose().catch(() => {});
     };
   }, 'git-control: routes');
+
+  /*
+   * The `/ship` workflow command. It queues the caller's request as one turn
+   * and the review gesture as the next, so the review runs as its own turn
+   * over the work the request produced. A profile without a command registry
+   * simply never activates this child.
+   */
+  ctx.inject(['commands'], (commandCtx) => {
+    commandCtx.commands.register({
+      name: SHIP_COMMAND,
+      description: 'Run the request, then review and fix the result',
+      input: { hint: '[request]', attachments: true },
+      recordInput: false,
+      handler: ({ agent, rawInput, attachments }) => {
+        const request = rawInput.trim();
+        if (request === '' && attachments.length === 0) {
+          return {
+            kind: 'error',
+            text: 'Usage: /ship <request> — describe the work, then it is reviewed and fixed.',
+          };
+        }
+        agent.followup(shipMessage([
+          ...attachments,
+          ...(request === '' ? [] : [{ type: 'text', text: request }]),
+        ]));
+        agent.followup(shipMessage([{ type: 'text', text: SHIP_REVIEW_PROMPT }]));
+        return {
+          kind: 'success',
+          text: 'Running the request now; /code-review-and-quality review and fix runs next.',
+        };
+      },
+    });
+  });
 }
