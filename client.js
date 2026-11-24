@@ -32,14 +32,18 @@ window.__ModuleLoader__.load({
     const PR_POLL_INTERVAL_MS = 45000;
     /** Branches a pull request is opened against, never from. */
     const PROTECTED_BRANCHES = new Set(['main', 'master', 'develop']);
-    /** Panel states kept across tab switches and panel remounts, per repository. */
+    /** Panel states kept across tab switches and panel remounts, per Session and repository. */
     const PANEL_CACHE = new Map();
-    /** How many repositories keep a cached panel state. */
+    /** How many panel entries keep a cached state. */
     const PANEL_CACHE_LIMIT = 8;
+    /** Commit-message drafts kept per panel entry, apart from the state they outlive. */
+    const DRAFT_CACHE = new Map();
+    /** How many drafts are kept; a draft is a short string, so it outlives many panel entries. */
+    const DRAFT_CACHE_LIMIT = 64;
     /** Elements the confirmation dialog cycles Tab through. */
     const FOCUSABLE = 'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex="-1"])';
 
-    /** The empty panel state a repository starts from. */
+    /** The empty state one panel entry starts from. */
     const emptyPanelState = () => ({
       status: null,
       tab: 'changes',
@@ -50,34 +54,84 @@ window.__ModuleLoader__.load({
       selected: null,
       diff: null,
       collapsedGroups: {},
-      message: '',
     });
 
     /**
-     * Read one repository's cached panel state.
+     * Key one panel entry by the Session that owns it and the repository it
+     * shows, so two Sessions on the same repository keep separate states and
+     * neither one's draft reaches the other.
+     * @param sessionId - the Session the panel is bound to, or null.
      * @param path - repository path, or null when none is chosen.
-     * @returns the cached state, or null when the repository was never shown.
+     * @returns the cache key, or null when there is no repository to key on.
      */
-    function readPanelState(path) {
+    function panelStateKey(sessionId, path) {
       if (typeof path !== 'string' || path === '') return null;
-      return PANEL_CACHE.get(path) ?? null;
+      const owner = typeof sessionId === 'string' ? sessionId : '';
+      return `${owner}\u0000${path}`;
     }
 
     /**
-     * Record one repository's panel state, evicting the oldest repository once
-     * the cache is full.
-     * @param path - repository path, or null when none is chosen.
+     * Read one panel entry's cached state.
+     * @param key - panel key, or null when no repository is chosen.
+     * @returns the cached state, or null when the entry was never shown.
+     */
+    function readPanelState(key) {
+      if (typeof key !== 'string' || key === '') return null;
+      return PANEL_CACHE.get(key) ?? null;
+    }
+
+    /**
+     * Keep one value in a bounded cache, refreshing its position and evicting
+     * the oldest entry once the cache is full.
+     * @param cache - the bounded cache.
+     * @param limit - how many entries it may hold.
+     * @param key - the entry key.
+     * @param value - the value to keep.
+     */
+    function remember(cache, limit, key, value) {
+      cache.delete(key);
+      cache.set(key, value);
+      while (cache.size > limit) {
+        const oldest = cache.keys().next();
+        if (oldest.done === true) return;
+        cache.delete(oldest.value);
+      }
+    }
+
+    /**
+     * Record one panel entry's state, evicting the oldest entry once the cache
+     * is full.
+     * @param key - panel key, or null when no repository is chosen.
      * @param state - the state to remember.
      */
-    function writePanelState(path, state) {
-      if (typeof path !== 'string' || path === '') return;
-      PANEL_CACHE.delete(path);
-      PANEL_CACHE.set(path, state);
-      while (PANEL_CACHE.size > PANEL_CACHE_LIMIT) {
-        const oldest = PANEL_CACHE.keys().next();
-        if (oldest.done === true) return;
-        PANEL_CACHE.delete(oldest.value);
+    function writePanelState(key, state) {
+      if (typeof key !== 'string' || key === '') return;
+      remember(PANEL_CACHE, PANEL_CACHE_LIMIT, key, state);
+    }
+
+    /**
+     * Read the commit-message draft of one panel entry.
+     * @param key - panel key, or null when no repository is chosen.
+     * @returns the draft, or '' when the entry has none.
+     */
+    function readDraft(key) {
+      if (typeof key !== 'string' || key === '') return '';
+      return DRAFT_CACHE.get(key) ?? '';
+    }
+
+    /**
+     * Record the commit-message draft of one panel entry. An empty draft
+     * forgets the entry, so a message that was committed never comes back.
+     * @param key - panel key, or null when no repository is chosen.
+     * @param text - the draft.
+     */
+    function writeDraft(key, text) {
+      if (typeof key !== 'string' || key === '') return;
+      if (text === '') {
+        DRAFT_CACHE.delete(key);
+        return;
       }
+      remember(DRAFT_CACHE, DRAFT_CACHE_LIMIT, key, text);
     }
 
     const DICTIONARY = {
@@ -730,8 +784,9 @@ window.__ModuleLoader__.load({
 
     /**
      * Render the repository panel.
-     * @param props - slot props: localized copy, the workspace snapshot hook, and
-     * an optional fixed repository path that removes the workspace selector.
+     * @param props - slot props: localized copy, the workspace snapshot hook, an
+     * optional fixed repository path that removes the workspace selector, and
+     * the Session the panel belongs to, which scopes what it remembers.
      * @returns the panel element.
      */
     function GitControlPage(props) {
@@ -742,7 +797,8 @@ window.__ModuleLoader__.load({
 
       const [repoPath, setRepoPath] = React.useState(null);
       const chosenPath = fixedPath ?? repoPath ?? (workspaces.length > 0 ? workspaces[0].path : null);
-      const cached = readPanelState(chosenPath) ?? emptyPanelState();
+      const panelKey = panelStateKey(sessionId, chosenPath);
+      const cached = readPanelState(panelKey) ?? emptyPanelState();
 
       const [status, setStatus] = React.useState(cached.status);
       const [phase, setPhase] = React.useState(cached.status === null ? 'idle' : 'ready');
@@ -750,7 +806,7 @@ window.__ModuleLoader__.load({
       const [tab, setTab] = React.useState(cached.tab);
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState(null);
-      const [message, setMessage] = React.useState(cached.message);
+      const [message, setMessage] = React.useState(readDraft(panelKey));
       const [stashMessage, setStashMessage] = React.useState('');
       const [stashUntracked, setStashUntracked] = React.useState(true);
       const [selected, setSelected] = React.useState(cached.selected);
@@ -783,13 +839,13 @@ window.__ModuleLoader__.load({
 
       isBusyOrInFlightRef.current = busy || generating || confirm !== null || phase === 'refreshing' || phase === 'loading';
 
-      /* The repository the state in hand belongs to, so a switch never writes across. */
-      const statePathRef = React.useRef(chosenPath);
+      /* The panel entry the state in hand belongs to, so a switch never writes across. */
+      const stateKeyRef = React.useRef(panelKey);
 
-      /* Remember everything the panel shows, so a remount reopens it in place. */
+      /* Remember the view the panel shows, and its draft, so a remount reopens it in place. */
       React.useEffect(() => {
-        if (statePathRef.current !== chosenPath) return;
-        writePanelState(chosenPath, {
+        if (stateKeyRef.current !== panelKey) return;
+        writePanelState(panelKey, {
           status,
           tab,
           branches,
@@ -799,17 +855,17 @@ window.__ModuleLoader__.load({
           selected,
           diff,
           collapsedGroups,
-          message,
         });
-      }, [chosenPath, status, tab, branches, commits, stashes, logLimit, selected, diff, collapsedGroups, message]);
+        writeDraft(panelKey, message);
+      }, [panelKey, status, tab, branches, commits, stashes, logLimit, selected, diff, collapsedGroups, message]);
 
       /*
-       * Show the cached state of the chosen repository as soon as it changes, so
-       * switching back to the panel paints the previous view instead of an empty
-       * one while the first read is in flight.
+       * Show the cached state of this panel entry as soon as it changes, so
+       * switching back to the Session paints its previous view instead of an
+       * empty one while the first read is in flight.
        */
       React.useEffect(() => {
-        const entry = readPanelState(chosenPath) ?? emptyPanelState();
+        const entry = readPanelState(panelKey) ?? emptyPanelState();
         setStatus(entry.status);
         setPhase(entry.status === null ? 'idle' : 'ready');
         setTab(entry.tab);
@@ -820,12 +876,16 @@ window.__ModuleLoader__.load({
         setSelected(entry.selected);
         setDiff(entry.diff);
         setCollapsedGroups(entry.collapsedGroups);
-        setMessage(entry.message);
+        setMessage(readDraft(panelKey));
         prevSelectedRef.current = entry.selected;
-        statePathRef.current = chosenPath;
-      }, [chosenPath]);
+        stateKeyRef.current = panelKey;
+      }, [panelKey]);
 
-      /* Read the status of the selected repository. */
+      /*
+       * Read the status of the selected repository. The entry key is a
+       * dependency on its own: switching to a Session that shows the same
+       * repository restores that Session's view, which may hold no status yet.
+       */
       React.useEffect(() => {
         if (chosenPath === null) {
           setStatus(null);
@@ -847,7 +907,7 @@ window.__ModuleLoader__.load({
             setError(failureOf(error));
           });
         return () => controller.abort();
-      }, [chosenPath, revision]);
+      }, [chosenPath, panelKey, revision]);
 
       /* Auto-refresh repository state continuously while the panel is open and visible. */
       React.useEffect(() => {

@@ -176,18 +176,20 @@ export function createPlugin(fetchFixture) {
 
   /**
    * Mount one component and settle it.
-   * @returns the rendered tree plus `flush` to re-settle after an interaction.
+   * @returns the rendered tree, `flush` to re-settle after an interaction, and
+   * `update` to re-render the same mount with new props.
    */
   const render = async (component, props) => {
     hooks = [];
     cleanups.length = 0;
+    let current = props;
     const settle = async () => {
       let tree = null;
       for (let pass = 0; pass < 50; pass += 1) {
         cursor = 0;
         dirty = false;
         pending = pending.slice();
-        tree = h(component, props);
+        tree = h(component, current);
         while (pending.length > 0) pending.shift()();
         await new Promise((resolve) => setTimeout(resolve, 0));
         if (!dirty) break;
@@ -195,7 +197,11 @@ export function createPlugin(fetchFixture) {
       return tree;
     };
     const tree = await settle();
-    return { tree, flush: settle };
+    const update = async (next) => {
+      current = next;
+      return settle();
+    };
+    return { tree, flush: settle, update };
   };
 
   return { plugin, components, render, portalHosts, listeners, fetched };

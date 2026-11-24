@@ -43,25 +43,28 @@ function fixtures(status, overrides = {}) {
   };
 }
 
+/** Props the Sidebar passes the pane for one Session's directory. */
+const paneProps = (sessionId) => ({
+  t,
+  useWorkspaces: () => [],
+  useSessions: () => '/repo',
+  useProjection: () => '/repo',
+  sessionId,
+});
+
 /** Mount the pane the Sidebar would render for one session directory. */
 async function renderPane(status, overrides) {
   const plugin = createPlugin(fixtures(status, overrides));
   const Pane = plugin.components.get('sidebar.right.pane.tab');
   assert.equal(typeof Pane, 'function', 'pane component registered');
-  const props = {
-    t,
-    useWorkspaces: () => [],
-    useSessions: () => '/repo',
-    useProjection: () => '/repo',
-    sessionId: 'session-1',
-  };
-  const view = await plugin.render(Pane, props);
+  const view = await plugin.render(Pane, paneProps('session-1'));
   return { ...plugin, ...view };
 }
 
 const rowButtons = (tree) => buttons(tree).filter((b) => b.p.className?.includes('gctl-rowMain'));
 const blockedButtons = (tree) => buttons(tree).filter((b) => b.p['aria-disabled'] === 'true');
 const syncHint = (tree) => findAll(tree, (n) => n.p?.className === 'gctl-syncHint').map((n) => n.k.join(''));
+const messageArea = (tree) => findAll(tree, (n) => n.tag === 'textarea')[0];
 
 test('registers the pane and its title', () => {
   const plugin = createPlugin(fixtures(baseStatus));
@@ -250,4 +253,35 @@ test('each tab renders its own panel content', async () => {
       assert.equal(findAll(after, (n) => n.p?.role === role).length, 1);
     }
   }
+});
+
+test('two Sessions on one repository keep separate commit drafts', async () => {
+  const plugin = createPlugin(fixtures(baseStatus));
+  const Pane = plugin.components.get('sidebar.right.pane.tab');
+  const mounted = await plugin.render(Pane, paneProps('session-1'));
+  assert.equal(messageArea(mounted.tree).p.value, '');
+  messageArea(mounted.tree).p.onChange({ target: { value: 'feat: session one' } });
+  assert.equal(messageArea(await mounted.flush()).p.value, 'feat: session one');
+
+  const second = await mounted.update(paneProps('session-2'));
+  assert.equal(messageArea(second).p.value, '', 'the other Session starts from its own draft');
+
+  const back = await mounted.update(paneProps('session-1'));
+  assert.equal(messageArea(back).p.value, 'feat: session one', 'the first draft comes back');
+});
+
+test('a commit draft outlives the panel state it was written in', async () => {
+  const plugin = createPlugin(fixtures(baseStatus));
+  const Pane = plugin.components.get('sidebar.right.pane.tab');
+  const first = await plugin.render(Pane, paneProps('session-1'));
+  messageArea(first.tree).p.onChange({ target: { value: 'feat: session one' } });
+  await first.flush();
+
+  /* Open more Sessions than the panel cache holds, so its first entry is evicted. */
+  for (let index = 2; index <= 9; index += 1) {
+    await plugin.render(Pane, paneProps(`session-${index}`));
+  }
+
+  const back = await plugin.render(Pane, paneProps('session-1'));
+  assert.equal(messageArea(back.tree).p.value, 'feat: session one');
 });

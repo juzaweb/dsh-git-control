@@ -162,7 +162,9 @@ It carries two icon controls:
 - **Stage all** — one `git add --all`, so new files and deletions are included.
 - **Generate message** — asks the configured commit model to write the message
   from the staged diff (the working tree when nothing is staged), fills the
-  composer, and never commits on its own.
+  composer, and never commits on its own. The draft belongs to the Session and
+  repository it was written in, so two Sessions on one repository never trade
+  or drop each other's text; it is held in memory, so a reload starts empty.
 
 The branch bar shows fetch, pull (`--ff-only`), and push as icons carrying their
 own counts, each enabled only where it can succeed:
