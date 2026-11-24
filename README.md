@@ -224,9 +224,10 @@ complete a merged branch whose work is already in its base branch.
 ## Configuration
 
 Message generation reads one optional plugin option, `commitModel`. When it is
-absent the plugin falls back to the default agent model, so an existing profile
-needs no change. Set it in the profile patch (`cordis.patch.yml`) to generate
-commit messages with a different model than the agent:
+absent the plugin falls back to the route of the default agent model, so an
+existing profile needs no change. Set it in the profile patch
+(`cordis.patch.yml`) to generate commit messages with a different model than
+the agent:
 
 ```yaml
 - id: git-control
@@ -235,8 +236,14 @@ commit messages with a different model than the agent:
     commitModel:
       provider: router
       model: qd/dfmodel
-      # reasoningEffort: low   # optional; the provider default applies when omitted
+      # reasoningEffort: low   # optional; the least effort the model offers applies when omitted
 ```
+
+Unless `reasoningEffort` names one, the call selects the least effort the
+model offers — `off` on every adapter that reports efforts — because a commit
+subject gains nothing from thinking. A model with no reasoning metadata is
+called with no effort at all, and the default agent model's own effort is never
+carried over.
 
 A profile patch replaces the whole matched config, so restate every option the
 entry keeps. `provider` and `model` must both be non-empty strings; a malformed

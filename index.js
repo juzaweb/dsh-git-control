@@ -92,7 +92,8 @@ function isConflicted(state) {
  * @typedef {object} CommitModelSelection
  * @property {string} provider - registered provider route.
  * @property {string} model - provider-owned model id.
- * @property {string} [reasoningEffort] - adapter-owned reasoning effort.
+ * @property {string} [reasoningEffort] - adapter-owned reasoning effort; the
+ * least effort the model offers applies when omitted.
  */
 
 /** Authenticated Client route backing the panel. */
@@ -1896,10 +1897,24 @@ class GitControl {
 
     let raw = '';
     try {
-      const stream = llm.stream({
-        provider: selection.provider,
-        model: selection.model,
-        ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+      const call = await llm.prepareCall(
+        {
+          provider: selection.provider,
+          model: selection.model,
+          maxTokens: MESSAGE_MAX_TOKENS,
+          temperature: 0.2,
+        },
+        controller.signal,
+        (controls, model) => {
+          /* A commit subject gains nothing from reasoning: the least effort the
+             route offers (normally `off`) wins unless the config named one. */
+          const effort = selection.reasoningEffort ?? model.reasoning?.efforts[0]?.id;
+          return effort === undefined ? controls : { ...controls, reasoningEffort: effort };
+        },
+      );
+
+      const stream = call.stream({
+        ...call.config,
         system: [
           'You write one git commit message for the staged change described below.',
           'Reply with the message only: no preamble, no explanation, no code fences, no quotes.',
@@ -1909,8 +1924,6 @@ class GitControl {
           'Write in English and describe only what the diff shows.',
         ].join(' '),
         messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
-        maxTokens: MESSAGE_MAX_TOKENS,
-        temperature: 0.2,
         signal: controller.signal,
       });
 
@@ -1964,7 +1977,11 @@ class GitControl {
       throw gitFailure('git-control/clean', 'There is nothing to describe: the work tree is clean.');
     }
     const configured = configuredCommitModel(this.commitModel);
-    const selection = configured ?? this.ctx.get('agentDefaultModel')?.currentSelection();
+    const agentModel = this.ctx.get('agentDefaultModel')?.currentSelection();
+    /* The agent's effort belongs to its conversation; a commit subject only
+       carries an effort the plugin config names explicitly. */
+    const selection = configured
+      ?? (agentModel === undefined ? undefined : { provider: agentModel.provider, model: agentModel.model });
     if (selection === undefined || selection === null) {
       throw gitFailure(
         'git-control/no-model',
